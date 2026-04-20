@@ -15,13 +15,13 @@ spring:
 
   jpa:
     hibernate:
-      ddl-auto: update
-      # v1: auto-create tables
-      # v2: switch to validate / migrations (Flyway)
+      ddl-auto: validate
     show-sql: false
     properties:
       hibernate:
         format_sql: true
+
+  defer-datasource-initialization: true  # ensures Flyway runs migrations before Hibernate validates the schema
 
   rabbitmq:
     host: localhost
