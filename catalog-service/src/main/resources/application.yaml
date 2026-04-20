@@ -5,13 +5,16 @@ spring:
     url: jdbc:postgresql://localhost:5433/catalog
     username: catalog_user
     password: catalog_pass
+
   jpa:
     hibernate:
-      ddl-auto: create-drop
+      ddl-auto: validate
     show-sql: true
     properties:
       hibernate:
         format_sql: true
+        
+  defer-datasource-initialization: true  # ensures Flyway runs migrations before Hibernate validates the schema
 
 server:
   port: 8082
