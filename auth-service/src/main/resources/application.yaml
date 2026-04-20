@@ -12,11 +12,13 @@ spring:
 
   jpa:
     hibernate:
-      ddl-auto: create-drop  # Automatically update the schema; use 'validate' or 'none' in production
+      ddl-auto: validate  # schema is created by Flyway migrations — Hibernate verifies entities match, never modifies
     show-sql: true           # Show SQL statements in the logs
     properties:
       hibernate:
         format_sql: true     # Format SQL output for readability
+
+  defer-datasource-initialization: true  # ensures Flyway runs migrations before Hibernate validates the schema
 
 # TEMPORARY: JWT secret is now hardcoded here to avoid Vault issues.
 security:
