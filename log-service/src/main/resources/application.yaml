@@ -1,0 +1,36 @@
+server:
+  port: 8090
+  # Log-service does not expose REST APIs
+  # Port is only for actuator and internal access
+
+spring:
+  application:
+    name: log-service
+
+  datasource:
+    url: jdbc:postgresql://localhost:5435/logs
+    username: log_user
+    password: log_pass
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+      # v1: auto-create tables
+      # v2: switch to validate / migrations (Flyway)
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: true
+
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: guest
+    password: guest
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

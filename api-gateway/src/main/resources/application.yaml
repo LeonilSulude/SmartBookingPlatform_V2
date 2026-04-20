@@ -1,0 +1,51 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: api-gateway
+
+  cloud:
+    gateway:
+      server:
+        webflux:
+          discovery:
+            locator:
+              enabled: true              # Automatically route based on Eureka service names
+              lower-case-service-id: true
+          routes:
+            - id: catalog-service        # Route to the Catalog Service
+              uri: lb://catalog-service
+              predicates:
+                - Path=/api/offers/**, /api/resources/**
+
+            - id: booking-service        # Route to the Booking Service
+              uri: lb://booking-service
+              predicates:
+                - Path=/api/bookings/**
+
+            - id: auth-service           # Route to the Auth Service
+              uri: lb://auth-service
+              predicates:
+                - Path=/api/auth/**
+
+security:
+  user:
+    name: none
+    password: none
+  basic:
+    enabled: false
+
+  jwt:
+    # Loaded from environment variable
+    secret: ${JWT_SECRET}
+
+eureka:
+  instance:
+    prefer-ip-address: true
+    ip-address: 127.0.0.1
+    
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka
+

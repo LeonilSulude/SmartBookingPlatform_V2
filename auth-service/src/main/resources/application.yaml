@@ -1,0 +1,35 @@
+server:
+  port: 8081  # The port where the auth-service will run
+
+spring:
+  application:
+    name: auth-service  # Registered name in Eureka
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/auth  # PostgreSQL database URL
+    username: auth_user                         # Database username
+    password: auth_pass                         # Database password
+
+  jpa:
+    hibernate:
+      ddl-auto: create-drop  # Automatically update the schema; use 'validate' or 'none' in production
+    show-sql: true           # Show SQL statements in the logs
+    properties:
+      hibernate:
+        format_sql: true     # Format SQL output for readability
+
+# TEMPORARY: JWT secret is now hardcoded here to avoid Vault issues.
+security:
+  jwt:
+    secret: ${JWT_SECRET} # Loaded from environment variable
+    expiration: 3600000  # JWT expiration time in milliseconds. 3600000 = 1 hour.
+
+eureka:
+  instance:
+    prefer-ip-address: true
+    ip-address: 127.0.0.1
+
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka
+      # The Eureka server where this service registers and discovers others
