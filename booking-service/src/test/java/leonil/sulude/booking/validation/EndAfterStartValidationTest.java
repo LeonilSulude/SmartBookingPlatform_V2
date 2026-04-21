@@ -40,7 +40,7 @@ class EndAfterStartValidatorTest {
                 "john@test.com",
                 LocalDateTime.now().plusHours(1),
                 LocalDateTime.now().plusHours(2),
-                BookingStatus.PENDING);
+                BookingStatus.PENDING, null);
 
         Set<ConstraintViolation<BookingRequestDTO>> violations = validator.validate(request);
         assertTrue(violations.isEmpty());
@@ -56,7 +56,7 @@ class EndAfterStartValidatorTest {
                 "john@test.com",
                 LocalDateTime.now().plusHours(2),
                 LocalDateTime.now().plusHours(1),
-                BookingStatus.PENDING);
+                BookingStatus.PENDING, null);
 
         Set<ConstraintViolation<BookingRequestDTO>> violations = validator.validate(request);
         assertFalse(violations.isEmpty());
@@ -73,7 +73,7 @@ class EndAfterStartValidatorTest {
                 "john@test.com",
                 time,
                 time,
-                BookingStatus.PENDING);
+                BookingStatus.PENDING, null);
 
         Set<ConstraintViolation<BookingRequestDTO>> violations = validator.validate(request);
         assertFalse(violations.isEmpty());

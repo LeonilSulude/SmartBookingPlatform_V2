@@ -6,6 +6,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.time.LocalDateTime;
+import java.util.Optional;
 import java.util.UUID;
 
 public interface BookingRepository extends JpaRepository<Booking, UUID> {
@@ -22,5 +23,8 @@ public interface BookingRepository extends JpaRepository<Booking, UUID> {
             @Param("startTime") LocalDateTime startTime,
             @Param("endTime") LocalDateTime endTime
     );
+
+    /** finds a booking by idempotency key — used to detect and return duplicate requests */
+    Optional<Booking> findByIdempotencyKey(String idempotencyKey);
 
 }

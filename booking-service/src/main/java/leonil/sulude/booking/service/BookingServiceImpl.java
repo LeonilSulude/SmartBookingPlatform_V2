@@ -44,6 +44,15 @@ public class BookingServiceImpl implements BookingService {
     @Override
     public BookingResponseDTO create(BookingRequestDTO dto) {
 
+        // if client provided an idempotency key, check if this request was already processed
+        if (dto.idempotencyKey() != null && !dto.idempotencyKey().isBlank()) {
+            Optional<Booking> existing = repository.findByIdempotencyKey(dto.idempotencyKey());
+            if (existing.isPresent()) {
+                // return the original response without creating a duplicate
+                return mapToResponseDTO(existing.get());
+            }
+        }
+
         // Check if there is conflict for the booked time
         boolean hasConflict = repository.existsOverlappingBooking(dto.resourceId(), dto.startTime(), dto.endTime());
         if (hasConflict) {
@@ -76,6 +85,7 @@ public class BookingServiceImpl implements BookingService {
         booking.setEndTime(dto.endTime());
         booking.setStatus(BookingStatus.PENDING);
         booking.setCreatedAt(LocalDateTime.now());
+        booking.setIdempotencyKey(dto.idempotencyKey()); // persist key to detect future retries
 
         Booking saved = repository.save(booking);
 

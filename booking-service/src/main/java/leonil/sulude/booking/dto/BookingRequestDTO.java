@@ -28,5 +28,6 @@ public record BookingRequestDTO(
         @Future(message = "End time must be in the future")
         LocalDateTime endTime,
 
-        BookingStatus status // optional, defaults to PENDING in the entity
+        BookingStatus status, // optional, defaults to PENDING in the entity
+        String idempotencyKey // optional — client-provided unique ID to prevent duplicate bookings on retry
 ) {}

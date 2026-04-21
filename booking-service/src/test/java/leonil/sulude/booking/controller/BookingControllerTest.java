@@ -132,6 +132,7 @@ class BookingControllerTest {
                 "bob@test.com",
                 LocalDateTime.now().plusHours(1),
                 LocalDateTime.now().plusHours(2),
+                BookingStatus.PENDING,
                 null
         );
 

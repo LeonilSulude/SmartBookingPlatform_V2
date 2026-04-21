@@ -43,6 +43,10 @@ public class Booking {
     @Version
     private Long version;
 
+    /** idempotency key — client-provided unique ID to prevent duplicate bookings on retry */
+    @Column(unique = true)
+    private String idempotencyKey;
+
     @PrePersist
     public void onCreate() {
         this.createdAt = LocalDateTime.now();

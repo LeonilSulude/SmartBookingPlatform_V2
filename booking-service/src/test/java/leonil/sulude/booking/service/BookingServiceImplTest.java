@@ -8,6 +8,7 @@ import leonil.sulude.booking.exception.BookingConflictException;
 import leonil.sulude.booking.exception.ResourceUnavailableException;
 import leonil.sulude.booking.feignclient.CatalogClient;
 import leonil.sulude.booking.model.Booking;
+import leonil.sulude.booking.model.BookingStatus;
 import leonil.sulude.booking.repository.BookingRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -57,6 +58,7 @@ class BookingServiceImplTest {
                 "john@test.com",
                 LocalDateTime.now().plusHours(1),
                 LocalDateTime.now().plusHours(2),
+                BookingStatus.PENDING,
                 null
         );
 
@@ -108,6 +110,7 @@ class BookingServiceImplTest {
                 "john@test.com",
                 LocalDateTime.now(),
                 LocalDateTime.now().plusHours(1),
+                BookingStatus.PENDING,
                 null
         );
 
@@ -136,6 +139,7 @@ class BookingServiceImplTest {
                 "john@test.com",
                 LocalDateTime.now(),
                 LocalDateTime.now().plusHours(1),
+                BookingStatus.PENDING,
                 null
         );
 
@@ -179,6 +183,7 @@ class BookingServiceImplTest {
                 "john@test.com",
                 start,
                 end,
+                BookingStatus.PENDING,
                 null
         );
 
