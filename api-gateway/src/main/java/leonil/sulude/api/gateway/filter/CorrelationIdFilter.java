@@ -7,66 +7,47 @@ import org.springframework.web.server.ServerWebExchange;
 import org.springframework.web.server.WebFilter;
 import org.springframework.web.server.WebFilterChain;
 import reactor.core.publisher.Mono;
-
 import java.util.UUID;
 
 /**
- * CorrelationIdFilter
- *
- * PURPOSE:
- * --------
- * Ensures every incoming HTTP request contains a correlation ID.
- *
- * WHY THIS MATTERS:
- * -----------------
- * - Enables distributed tracing across microservices
- * - Allows log-service to group logs by request flow
- * - Essential for debugging in distributed systems
- *
- * HOW IT WORKS:
- * -------------
- * 1. Checks if the request already contains "X-Correlation-Id"
- * 2. If not, generates a new UUID
- * 3. Stores the value in MDC (thread-local logging context)
- * 4. Adds the header to the response
- * 5. Clears MDC after request completes (critical to avoid leakage)
- *
- * IMPORTANT:
- * ----------
- * MDC uses ThreadLocal internally.
- * Since threads are reused, failing to clear MDC may cause
- * correlation IDs to leak between unrelated requests.
+ * Generates or propagates X-Correlation-Id for every incoming request.
+ * Stores it in Reactor Context instead of MDC — MDC is thread-local and
+ * unsafe in WebFlux where a request can be processed across multiple threads.
+ * Reactor Context travels with the reactive pipeline regardless of thread switches.
  */
 @Slf4j
 @Component
 public class CorrelationIdFilter implements WebFilter {
 
     public static final String CORRELATION_HEADER = "X-Correlation-Id";
+    private static final String CORRELATION_KEY = "correlationId";
 
     @Override
     public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
 
-        // 1. Extract correlation ID from request header
+        // use existing ID if provided by client or upstream system, otherwise generate
         String correlationId = exchange.getRequest()
                 .getHeaders()
                 .getFirst(CORRELATION_HEADER);
 
-        // 2. Generate one if missing
         if (correlationId == null || correlationId.isBlank()) {
             correlationId = UUID.randomUUID().toString();
         }
 
-        // 3. Store in MDC (thread-local logging context)
-        MDC.put("correlationId", correlationId);
+        final String finalCorrelationId = correlationId;
 
-        // 4. Add to response header (so clients can see it)
-        exchange.getResponse()
+        // mutate request to forward correlation ID to downstream services
+        ServerWebExchange mutatedExchange = exchange.mutate()
+                .request(r -> r.header(CORRELATION_HEADER, finalCorrelationId))
+                .build();
+
+        // add to response so clients can reference it
+        mutatedExchange.getResponse()
                 .getHeaders()
-                .add(CORRELATION_HEADER, correlationId);
+                .add(CORRELATION_HEADER, finalCorrelationId);
 
-        // 5. Continue filter chain
-        return chain.filter(exchange)
-                // 6. Always clear MDC to prevent thread pollution
-                .doFinally(signalType -> MDC.clear());
+        // propagate via Reactor Context — safe across thread switches unlike MDC
+        return chain.filter(mutatedExchange)
+                .contextWrite(ctx -> ctx.put(CORRELATION_KEY, finalCorrelationId));
     }
 }
