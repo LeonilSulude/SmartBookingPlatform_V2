@@ -7,6 +7,7 @@ import org.springframework.security.config.annotation.web.reactive.EnableWebFlux
 import org.springframework.security.config.web.server.SecurityWebFiltersOrder;
 import org.springframework.security.config.web.server.ServerHttpSecurity;
 import org.springframework.security.web.server.SecurityWebFilterChain;
+import org.springframework.http.HttpMethod;
 
 @Configuration
 @EnableWebFluxSecurity
@@ -35,15 +36,22 @@ public class SecurityConfig {
 
                 // Define route rules
                 .authorizeExchange(exchanges -> exchanges
-                        // Allow open access to the auth service
+                        // public endpoints — no token required
                         .pathMatchers("/api/auth/**").permitAll()
-
-                        //TESTING
                         .pathMatchers("/actuator/**").permitAll()
                         .pathMatchers("/test").permitAll()
 
+                        // only PROVIDER can manage offers and resources
+                        .pathMatchers(HttpMethod.POST, "/api/offers/**", "/api/resources/**").hasAuthority("PROVIDER")
+                        .pathMatchers(HttpMethod.DELETE, "/api/offers/**", "/api/resources/**").hasAuthority("PROVIDER")
 
-                        // All other routes require authentication
+                        // only CLIENT can create bookings
+                        .pathMatchers(HttpMethod.POST, "/api/bookings/**").hasAuthority("CLIENT")
+
+                        // authenticated users can read catalog and their bookings
+                        .pathMatchers(HttpMethod.GET, "/api/offers/**", "/api/resources/**", "/api/bookings/**").authenticated()
+
+                        // everything else requires authentication
                         .anyExchange().authenticated()
                 )
 

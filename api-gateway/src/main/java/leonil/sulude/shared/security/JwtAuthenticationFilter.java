@@ -3,6 +3,7 @@ package leonil.sulude.shared.security;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpHeaders;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.ReactiveSecurityContextHolder;
 import org.springframework.security.core.userdetails.User;
 import org.springframework.stereotype.Component;
@@ -10,8 +11,7 @@ import org.springframework.web.server.ServerWebExchange;
 import org.springframework.web.server.WebFilter;
 import org.springframework.web.server.WebFilterChain;
 import reactor.core.publisher.Mono;
-
-import java.util.Collections;
+import java.util.List;
 
 /**
  * JWT Authentication Filter for Spring Cloud Gateway using WebFlux.
@@ -20,7 +20,8 @@ import java.util.Collections;
  * <ul>
  *   <li>Extracts the JWT token from the Authorization header</li>
  *   <li>Validates the token using JwtService</li>
- *   <li>If valid, creates an Authentication object with a dummy User</li>
+ *   <li>Extracts the role claim and sets it as a GrantedAuthority</li>
+ *   <li>If valid, creates an Authentication object populated with role</li>
  *   <li>Stores the authentication in the reactive security context</li>
  * </ul>
  *
@@ -47,7 +48,9 @@ public class JwtAuthenticationFilter implements WebFilter {
     public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
 
         // Read the Authorization header from the request
-        String authHeader = exchange.getRequest().getHeaders().getFirst(HttpHeaders.AUTHORIZATION);
+        String authHeader = exchange.getRequest()
+                .getHeaders()
+                .getFirst(HttpHeaders.AUTHORIZATION);
 
         // If there's no token or the format is incorrect, skip authentication
         if (authHeader == null || !authHeader.startsWith("Bearer ")) {
@@ -57,17 +60,24 @@ public class JwtAuthenticationFilter implements WebFilter {
         // Remove "Bearer " prefix to extract the raw token
         String token = authHeader.substring(7);
 
-        // Extract username/email/ID from token (usually stored as subject)
+        // Extract username/email from token subject claim
         String username = jwtService.extractUsername(token);
 
         // If the token is valid and we could extract a user
         if (username != null && jwtService.isTokenValid(token)) {
-            // Create a Spring Security User with no roles (authorities)
-            User user = new User(username, "", Collections.emptyList());
+
+            // extract role from token and wrap as a GrantedAuthority for RBAC
+            String role = jwtService.extractRole(token);
+            List<SimpleGrantedAuthority> authorities = role != null
+                    ? List.of(new SimpleGrantedAuthority(role))
+                    : List.of();
+
+            // Create a Spring Security User populated with role authorities
+            User user = new User(username, "", authorities);
 
             // Wrap user in an authentication token
             UsernamePasswordAuthenticationToken authentication =
-                    new UsernamePasswordAuthenticationToken(user, null, user.getAuthorities());
+                    new UsernamePasswordAuthenticationToken(user, null, authorities);
 
             // Add authentication to the reactive context so Spring Security knows the user is authenticated
             return chain.filter(exchange)

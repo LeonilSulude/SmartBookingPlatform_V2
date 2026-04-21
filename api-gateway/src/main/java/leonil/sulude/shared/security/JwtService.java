@@ -42,6 +42,17 @@ public class JwtService {
     }
 
     /**
+     * Extracts the role claim from the token.
+     * Role is stored as a custom claim — not part of the standard JWT subject.
+     *
+     * @param token the JWT
+     * @return the role string (e.g. CLIENT, PROVIDER, ADMIN) or null if not present
+     */
+    public String extractRole(String token) {
+        return extractClaim(token, claims -> claims.get("role", String.class));
+    }
+
+    /**
      * Generic method to extract a specific claim.
      *
      * @param token the JWT
