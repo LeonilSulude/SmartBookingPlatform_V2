@@ -39,6 +39,10 @@ public class Booking {
     @Column(nullable = false, updatable = false)
     private LocalDateTime createdAt;
 
+    /** optimistic locking — prevents concurrent modification of the same booking */
+    @Version
+    private Long version;
+
     @PrePersist
     public void onCreate() {
         this.createdAt = LocalDateTime.now();

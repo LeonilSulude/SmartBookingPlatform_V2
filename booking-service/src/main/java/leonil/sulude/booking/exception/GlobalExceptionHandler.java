@@ -5,6 +5,7 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ControllerAdvice;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -201,6 +202,22 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(apiError);
     }
 
+    /**
+     * Handles optimistic locking conflicts — thrown when two concurrent requests
+     * attempt to modify the same booking simultaneously.
+     * Returns HTTP 409 (Conflict) so the client knows to retry.
+     */
+    @ExceptionHandler(ObjectOptimisticLockingFailureException.class)
+    public ResponseEntity<ApiError> handleOptimisticLocking(ObjectOptimisticLockingFailureException ex) {
+        ApiError apiError = new ApiError(
+                HttpStatus.CONFLICT.value(),
+                "Conflict",
+                "Booking was modified by another request. Please try again.",
+                LocalDateTime.now(),
+                Collections.emptyList()
+        );
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(apiError);
+    }
 
 
 }
