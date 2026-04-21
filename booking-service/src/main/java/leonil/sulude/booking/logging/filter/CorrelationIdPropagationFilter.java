@@ -1,60 +1,50 @@
 package leonil.sulude.booking.logging.filter;
 
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.MDC;
 import org.springframework.stereotype.Component;
-import org.springframework.web.server.ServerWebExchange;
-import org.springframework.web.server.WebFilter;
-import org.springframework.web.server.WebFilterChain;
-import reactor.core.publisher.Mono;
-
+import org.springframework.web.filter.OncePerRequestFilter;
+import java.io.IOException;
 import java.util.UUID;
 
 /**
- * CorrelationIdPropagationFilter
- *
- * PURPOSE:
- * --------
- * Reads correlation ID from incoming HTTP requests
- * and stores it in MDC for logging consistency.
- *
- * NOTE:
- * -----
- * This service does NOT generate correlation IDs.
- * The API Gateway is responsible for generation.
- *
- * This filter simply propagates it internally
- * for consistent logging within this service.
+ * Reads X-Correlation-Id from incoming requests and stores it in MDC.
+ * Uses OncePerRequestFilter — correct interface for servlet-based (Spring MVC) services.
+ * WebFilter is WebFlux only and must not be used here.
  */
 @Component
-public class CorrelationIdPropagationFilter implements WebFilter {
+public class CorrelationIdPropagationFilter extends OncePerRequestFilter {
 
     private static final String CORRELATION_HEADER = "X-Correlation-Id";
     private static final String MDC_KEY = "correlationId";
 
     @Override
-    public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
+    protected void doFilterInternal(HttpServletRequest request,
+                                    HttpServletResponse response,
+                                    FilterChain filterChain)
+            throws ServletException, IOException {
 
-        String correlationId = exchange.getRequest()
-                .getHeaders()
-                .getFirst(CORRELATION_HEADER);
+        String correlationId = request.getHeader(CORRELATION_HEADER);
 
+        // fall back to a new UUID if the gateway did not provide one
         if (correlationId == null || correlationId.isBlank()) {
             correlationId = UUID.randomUUID().toString();
         }
 
-        final String finalCorrelationId = correlationId;
+        // store in MDC so all log statements in this request include the correlation ID
+        MDC.put(MDC_KEY, correlationId);
 
-        // Store in MDC for logging
-        MDC.put(MDC_KEY, finalCorrelationId);
+        // propagate to response for client traceability
+        response.addHeader(CORRELATION_HEADER, correlationId);
 
-        // Expose it in response for traceability
-        exchange.getResponse()
-                .getHeaders()
-                .add(CORRELATION_HEADER, finalCorrelationId);
-
-        // Clear MDC after request completes (ThreadLocal safety)
-        return chain.filter(exchange)
-                .doFinally(signalType -> MDC.remove(MDC_KEY));
+        try {
+            filterChain.doFilter(request, response);
+        } finally {
+            // always clear MDC after request — prevents thread pool contamination
+            MDC.remove(MDC_KEY);
+        }
     }
 }
-

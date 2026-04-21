@@ -1,7 +1,7 @@
 services:
   auth-db:
     image: postgres:16
-    container_name: auth-db
+    container_name: auth-db-v2
     environment:
       POSTGRES_DB: auth
       POSTGRES_USER: auth_user
@@ -9,10 +9,10 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - auth_pgdata:/var/lib/postgresql/data
+      - auth_pgdata-v2:/var/lib/postgresql/data
   catalog-db:
     image: postgres:16
-    container_name: catalog-db
+    container_name: catalog-db-v2
     environment:
       POSTGRES_DB: catalog
       POSTGRES_USER: catalog_user
@@ -20,11 +20,11 @@ services:
     ports:
       - "5433:5432"
     volumes:
-      - catalog_pgdata:/var/lib/postgresql/data
+      - catalog_pgdata-v2:/var/lib/postgresql/data
       
   booking-db:
     image: postgres:16
-    container_name: booking-db
+    container_name: booking-db-v2
     environment:
       POSTGRES_DB: booking
       POSTGRES_USER: booking_user
@@ -32,11 +32,11 @@ services:
     ports:
       - "5434:5432"
     volumes:
-      - booking_pgdata:/var/lib/postgresql/data
+      - booking_pgdata-v2:/var/lib/postgresql/data
 
   log-db:
     image: postgres:16
-    container_name: log-db
+    container_name: log-db-v2
     environment:
       POSTGRES_DB: logs
       POSTGRES_USER: log_user
@@ -44,7 +44,7 @@ services:
     ports:
       - "5435:5432"
     volumes:
-      - log_pgdata:/var/lib/postgresql/data
+      - log_pgdata-v2:/var/lib/postgresql/data
 
       
   rabbitmq:
@@ -60,7 +60,7 @@ services:
 
 
 volumes:
-  auth_pgdata:
-  catalog_pgdata:
-  booking_pgdata:
-  log_pgdata:
+  auth_pgdata-v2:
+  catalog_pgdata-v2:
+  booking_pgdata-v2:
+  log_pgdata-v2:

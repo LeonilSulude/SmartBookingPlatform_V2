@@ -1,3 +1,7 @@
+> **V2 — work in progress.**  
+> Built on top of [SmartBookingPlatform V1](https://github.com/leoni-sulude/SmartBookingPlatform_V1).  
+> V1 is stable and documented — this repo evolves the architecture.
+
 # SmartBookingPlatform
 
 A **microservices-based booking platform** built with **Spring Boot and Spring Cloud**, demonstrating a modern backend architecture with service discovery, API gateway routing, JWT authentication, and load testing.

@@ -129,7 +129,7 @@
 			<artifactId>flyway-database-postgresql</artifactId>
 		</dependency>
 	</dependencies>
-	
+
 	<dependencyManagement>
 		<dependencies>
 			<dependency>
