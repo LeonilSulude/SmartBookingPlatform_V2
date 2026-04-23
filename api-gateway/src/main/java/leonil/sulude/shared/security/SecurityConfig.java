@@ -41,6 +41,9 @@ public class SecurityConfig {
                         .pathMatchers("/actuator/**").permitAll()
                         .pathMatchers("/test").permitAll()
 
+                        // ADMIN has full access to all routes
+                        .pathMatchers("/**").hasAuthority("ADMIN")
+
                         // only PROVIDER can manage offers and resources
                         .pathMatchers(HttpMethod.POST, "/api/offers/**", "/api/resources/**").hasAuthority("PROVIDER")
                         .pathMatchers(HttpMethod.DELETE, "/api/offers/**", "/api/resources/**").hasAuthority("PROVIDER")
