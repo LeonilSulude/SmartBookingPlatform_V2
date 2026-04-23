@@ -65,12 +65,12 @@ public class ServiceResourceController {
                 .orElse(ResponseEntity.notFound().build());
     }
 
-    /**
+/*    *//**
      * Deletes a resource by its ID.
      *
      * @param id Resource ID
      * @return 204 No Content on success
-     */
+     *//*
     @Operation(
             summary = "Delete a service resource",
             description = "Deletes a service resource by its identifier."
@@ -80,5 +80,23 @@ public class ServiceResourceController {
     public ResponseEntity<Void> delete(@PathVariable UUID id) {
         service.delete(id);
         return ResponseEntity.noContent().build();
+    }*/
+
+    /**
+     * Deactivates a resource — soft delete.
+     * Physical delete is not supported to prevent orphaned bookings.
+     * A deactivated resource remains in the database for audit and existing booking integrity.
+     */
+    @Operation(
+            summary = "Deactivate a service resource",
+            description = "Marks a resource as inactive. Existing bookings are preserved. New bookings are rejected."
+    )
+    @ApiResponse(responseCode = "200", description = "Resource deactivated successfully")
+    @ApiResponse(responseCode = "404", description = "Resource not found")
+    @PatchMapping("/{id}/deactivate")
+    public ResponseEntity<ServiceResourceResponseDTO> deactivate(@PathVariable UUID id) {
+        return service.deactivate(id)
+                .map(ResponseEntity::ok)
+                .orElse(ResponseEntity.notFound().build());
     }
 }

@@ -37,10 +37,18 @@ public interface ServiceResourceService {
      */
     Optional<ServiceResourceResponseDTO> getById(UUID id);
 
-    /**
+/*    *//**
      * Deletes a service resource by its unique ID.
      *
      * @param id The ID of the resource to delete.
+     *//*
+    void delete(UUID id);*/
+
+    /**
+     * Deactivates a resource by ID — soft delete.
+     *
+     * @param id the resource ID
+     * @return the updated resource, or empty if not found
      */
-    void delete(UUID id);
+    Optional<ServiceResourceResponseDTO> deactivate(UUID id);
 }

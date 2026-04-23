@@ -1,0 +1,2 @@
+# disable Kafka auto-configuration for tests that don't need it
+spring.autoconfigure.exclude=org.springframework.boot.autoconfigure.kafka.KafkaAutoConfiguration

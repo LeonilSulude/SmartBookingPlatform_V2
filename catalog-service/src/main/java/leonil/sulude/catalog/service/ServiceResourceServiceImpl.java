@@ -1,8 +1,11 @@
 package leonil.sulude.catalog.service;
 
+import leonil.sulude.catalog.dto.ResourceEventDTO;
 import leonil.sulude.catalog.dto.ServiceResourceRequestDTO;
 import leonil.sulude.catalog.dto.ServiceResourceResponseDTO;
 import leonil.sulude.catalog.dto.UnavailablePeriodDTO;
+import leonil.sulude.catalog.messaging.ResourceEventProducer;
+import leonil.sulude.catalog.messaging.ResourceEventType;
 import leonil.sulude.catalog.model.ServiceOffer;
 import leonil.sulude.catalog.model.ServiceResource;
 import leonil.sulude.catalog.model.UnavailablePeriod;
@@ -20,10 +23,14 @@ public class ServiceResourceServiceImpl implements ServiceResourceService {
 
     private final ServiceResourceRepository repository;
     private final ServiceOfferRepository offerRepository;
+    private final ResourceEventProducer eventProducer;
 
-    public ServiceResourceServiceImpl(ServiceResourceRepository repository, ServiceOfferRepository offerRepository) {
+    public ServiceResourceServiceImpl(ServiceResourceRepository repository,
+                                      ServiceOfferRepository offerRepository,
+                                      ResourceEventProducer eventProducer) {
         this.repository = repository;
         this.offerRepository = offerRepository;
+        this.eventProducer = eventProducer;
     }
 
     /**
@@ -60,6 +67,17 @@ public class ServiceResourceServiceImpl implements ServiceResourceService {
         }
 
         ServiceResource saved = repository.save(resource);
+
+        // publish event so Booking Service can cache this resource
+        eventProducer.publish(new ResourceEventDTO(
+                ResourceEventType.RESOURCE_CREATED,
+                saved.getId(),
+                saved.getName(),
+                saved.getPrice(),
+                saved.getDurationInMinutes(),
+                saved.isActive()
+        ));
+
         return toResponseDTO(saved);
     }
 
@@ -89,14 +107,42 @@ public class ServiceResourceServiceImpl implements ServiceResourceService {
                 .map(this::toResponseDTO);
     }
 
-    /**
+/*    *//**
      * Deletes a resource by ID.
      *
      * @param id The ID to delete.
-     */
+     *//*
     @Override
     public void delete(UUID id) {
         repository.deleteById(id);
+    }*/
+
+    /**
+     * Deactivates a resource — marks as inactive and publishes RESOURCE_DEACTIVATED event.
+     * Physical delete is not supported to prevent orphaned bookings in the Booking Service.
+     *
+     * @param id the resource ID
+     * @return the updated resource DTO, or empty if not found
+     */
+    @Override
+    public Optional<ServiceResourceResponseDTO> deactivate(UUID id) {
+        return repository.findById(id)
+                .map(resource -> {
+                    resource.setActive(false);
+                    ServiceResource saved = repository.save(resource);
+
+                    // notify Booking Service to mark this resource as inactive in its cache
+                    eventProducer.publish(new ResourceEventDTO(
+                            ResourceEventType.RESOURCE_DEACTIVATED,
+                            saved.getId(),
+                            saved.getName(),
+                            saved.getPrice(),
+                            saved.getDurationInMinutes(),
+                            saved.isActive()
+                    ));
+
+                    return toResponseDTO(saved);
+                });
     }
 
     /**

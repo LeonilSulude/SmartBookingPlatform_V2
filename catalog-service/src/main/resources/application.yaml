@@ -16,6 +16,13 @@ spring:
         
   defer-datasource-initialization: true  # ensures Flyway runs migrations before Hibernate validates the schema
 
+  kafka:
+    bootstrap-servers: localhost:9092  # Kafka broker address
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        spring.json.add.type.headers: false  # don't include Java type info in headers — keeps messages portable
 server:
   port: 8082
 

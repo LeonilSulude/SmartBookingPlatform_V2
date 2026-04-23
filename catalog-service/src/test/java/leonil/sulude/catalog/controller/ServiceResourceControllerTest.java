@@ -12,6 +12,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -122,18 +123,52 @@ class ServiceResourceControllerTest {
         verify(service).getById(id);
     }
 
+///*    *//**
+//     * Tests DELETE /api/resources/{id}
+//     *//*
+//    @Test
+//    void shouldDeleteResource() throws Exception {
+//
+//        UUID id = UUID.randomUUID();
+//
+//        mockMvc.perform(delete("/api/resources/" + id))
+//                .andExpect(status().isNoContent());
+//
+//        verify(service).delete(id); // Ensure delete method was called
+//    }*/
+
+
     /**
-     * Tests DELETE /api/resources/{id}
+     * Tests PATCH /api/resources/{id}/deactivate
+     * Verifies that deactivating a resource returns HTTP 200 with the updated resource.
      */
     @Test
-    void shouldDeleteResource() throws Exception {
+    void shouldDeactivateResource() throws Exception {
+        UUID id = UUID.randomUUID();
+        ServiceResourceResponseDTO response = new ServiceResourceResponseDTO(
+                id, "Room 101", BigDecimal.valueOf(99.99), 60, false, List.of()
+        );
 
+        when(service.deactivate(id)).thenReturn(Optional.of(response));
+
+        mockMvc.perform(patch("/api/resources/" + id + "/deactivate"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(id.toString()))
+                .andExpect(jsonPath("$.active").value(false));
+    }
+
+    /**
+     * Tests PATCH /api/resources/{id}/deactivate when resource does not exist.
+     * Verifies that HTTP 404 is returned.
+     */
+    @Test
+    void shouldReturn404WhenDeactivatingNonExistentResource() throws Exception {
         UUID id = UUID.randomUUID();
 
-        mockMvc.perform(delete("/api/resources/" + id))
-                .andExpect(status().isNoContent());
+        when(service.deactivate(id)).thenReturn(Optional.empty());
 
-        verify(service).delete(id); // Ensure delete method was called
+        mockMvc.perform(patch("/api/resources/" + id + "/deactivate"))
+                .andExpect(status().isNotFound());
     }
 
     /**
