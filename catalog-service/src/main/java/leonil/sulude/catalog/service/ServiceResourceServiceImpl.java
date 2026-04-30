@@ -205,4 +205,12 @@ public class ServiceResourceServiceImpl implements ServiceResourceService {
                     return toResponseDTO(saved);
                 });
     }
+
+    @Override
+    public List<ServiceResourceResponseDTO> getAllActive() {
+        return repository.findByActiveTrue()
+                .stream()
+                .map(this::toResponseDTO)
+                .toList();
+    }
 }

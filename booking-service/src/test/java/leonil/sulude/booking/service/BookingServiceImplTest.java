@@ -10,6 +10,7 @@ import leonil.sulude.booking.feignclient.CatalogClient;
 import leonil.sulude.booking.model.Booking;
 import leonil.sulude.booking.model.BookingStatus;
 import leonil.sulude.booking.repository.BookingRepository;
+import leonil.sulude.booking.repository.ResourceCacheRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.*;
@@ -17,6 +18,7 @@ import org.mockito.*;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -35,6 +37,9 @@ class BookingServiceImplTest {
 
     @Mock
     private CatalogClient catalogClient;
+
+    @Mock
+    private ResourceCacheRepository resourceCacheRepository; // mocked cache repository
 
     @InjectMocks
     private BookingServiceImpl service;
@@ -62,8 +67,13 @@ class BookingServiceImplTest {
                 null
         );
 
+        // no overlapping bookings exist for the requested time slot
         when(repository.existsOverlappingBooking(any(), any(), any()))
                 .thenReturn(false);
+
+        // simulate cache miss — forces fallback to Catalog via OpenFeign
+        when(resourceCacheRepository.findById(any())).thenReturn(Optional.empty());
+
 
         ServiceResourceResponseDTO resource =
                 new ServiceResourceResponseDTO(
@@ -143,8 +153,13 @@ class BookingServiceImplTest {
                 null
         );
 
+        // no overlapping bookings exist for the requested time slot
         when(repository.existsOverlappingBooking(any(), any(), any()))
                 .thenReturn(false);
+
+        // simulate cache miss — forces fallback to Catalog via OpenFeign
+        when(resourceCacheRepository.findById(any())).thenReturn(Optional.empty());
+
 
         ServiceResourceResponseDTO resource =
                 new ServiceResourceResponseDTO(
@@ -187,8 +202,12 @@ class BookingServiceImplTest {
                 null
         );
 
+        // no overlapping bookings exist for the requested time slot
         when(repository.existsOverlappingBooking(any(), any(), any()))
                 .thenReturn(false);
+
+        // simulate cache miss — forces fallback to Catalog via OpenFeign
+        when(resourceCacheRepository.findById(any())).thenReturn(Optional.empty());
 
         UnavailablePeriodDTO period =
                 new UnavailablePeriodDTO(

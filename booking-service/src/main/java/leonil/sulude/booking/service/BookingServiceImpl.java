@@ -10,7 +10,9 @@ import leonil.sulude.booking.exception.ResourceUnavailableException;
 import leonil.sulude.booking.feignclient.CatalogClient;
 import leonil.sulude.booking.model.Booking;
 import leonil.sulude.booking.model.BookingStatus;
+import leonil.sulude.booking.model.ResourceCache;
 import leonil.sulude.booking.repository.BookingRepository;
+import leonil.sulude.booking.repository.ResourceCacheRepository;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -23,10 +25,14 @@ public class BookingServiceImpl implements BookingService {
 
     private final BookingRepository repository;
     private final CatalogClient catalogClient;
+    private final ResourceCacheRepository resourceCacheRepository; // local cache of stable resource data from Catalog
 
-    public BookingServiceImpl(BookingRepository repository, CatalogClient catalogClient) {
+    public BookingServiceImpl(BookingRepository repository,
+                              CatalogClient catalogClient,
+                              ResourceCacheRepository resourceCacheRepository) {
         this.repository = repository;
         this.catalogClient = catalogClient;
+        this.resourceCacheRepository = resourceCacheRepository;
     }
 
     @Override
@@ -54,19 +60,21 @@ public class BookingServiceImpl implements BookingService {
         }
 
         // Check if there is conflict for the booked time
-        boolean hasConflict = repository.existsOverlappingBooking(dto.resourceId(), dto.startTime(), dto.endTime());
+        boolean hasConflict = repository.existsOverlappingBooking(
+                dto.resourceId(), dto.startTime(), dto.endTime());
         if (hasConflict) {
             throw new BookingConflictException("Resource is already booked during this time.");
         }
 
-        // Retrieve resource from Catalog Service (protected by resilience patterns)
-        ServiceResourceResponseDTO resource = fetchResource(dto.resourceId());
+        // resolve resource — local cache first, fallback to Catalog via OpenFeign on cache miss
+        ServiceResourceResponseDTO resource = resolveResource(dto.resourceId());
 
         if (resource == null || !resource.active()) {
             throw new ResourceUnavailableException("Service resource is not available for booking");
         }
 
         // Check if the reservation conflicts with periods of unavailability
+        // unavailablePeriods always come from Catalog — time-sensitive, cannot tolerate staleness
         boolean unavailableConflict = resource.unavailablePeriods() != null &&
                 resource.unavailablePeriods().stream().anyMatch(period ->
                         dto.startTime().isBefore(period.endTime()) &&
@@ -114,8 +122,8 @@ public class BookingServiceImpl implements BookingService {
     }
 
     private BookingResponseDTO mapToResponseDTO(Booking booking) {
-
-        ServiceResourceResponseDTO resource = fetchResource(booking.getResourceId());
+        // use cache for stable data — avoids Catalog call for every booking in list
+        ServiceResourceResponseDTO resource = resolveResource(booking.getResourceId());
 
         return new BookingResponseDTO(
                 booking.getId(),
@@ -130,6 +138,48 @@ public class BookingServiceImpl implements BookingService {
                 resource != null ? resource.price() : null,
                 resource != null ? resource.durationInMinutes() : null
         );
+    }
+
+    /**
+     * Resolves resource data using a two-tier strategy:
+     * 1. Local resource cache — fast, no network call, covers stable data (name, price, duration)
+     * 2. Catalog Service via OpenFeign — fallback for cache misses, also populates the cache
+     *
+     * Unavailable periods are always fetched from Catalog — they are time-sensitive
+     * and cannot tolerate staleness without risking double-booking.
+     */
+    private ServiceResourceResponseDTO resolveResource(UUID resourceId) {
+        // check local cache first
+        Optional<ResourceCache> cached = resourceCacheRepository.findById(resourceId);
+
+        if (cached.isPresent()) {
+            ResourceCache cache = cached.get();
+            // fetch unavailable periods from Catalog — time-sensitive, must be real-time
+            ServiceResourceResponseDTO fromCatalog = fetchResource(resourceId);
+            return new ServiceResourceResponseDTO(
+                    cache.getId(),
+                    cache.getName(),
+                    cache.getPrice(),
+                    cache.getDurationInMinutes(),
+                    cache.isActive(),
+                    fromCatalog != null ? fromCatalog.unavailablePeriods() : List.of()
+            );
+        }
+
+        // cache miss — fetch everything from Catalog and populate cache for future requests
+        ServiceResourceResponseDTO resource = fetchResource(resourceId);
+        if (resource != null) {
+            ResourceCache newEntry = ResourceCache.builder()
+                    .id(resource.id())
+                    .name(resource.name())
+                    .price(resource.price())
+                    .durationInMinutes(resource.durationInMinutes())
+                    .active(resource.active())
+                    .lastUpdated(LocalDateTime.now())
+                    .build();
+            resourceCacheRepository.save(newEntry);
+        }
+        return resource;
     }
 
     /**
@@ -150,5 +200,4 @@ public class BookingServiceImpl implements BookingService {
     public ServiceResourceResponseDTO catalogFallback(UUID resourceId, Throwable ex) {
         throw new ResourceUnavailableException("Catalog service unavailable");
     }
-
 }

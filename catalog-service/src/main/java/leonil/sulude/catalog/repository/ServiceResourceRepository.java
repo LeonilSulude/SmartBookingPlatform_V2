@@ -8,4 +8,7 @@ import java.util.UUID;
 
 public interface ServiceResourceRepository extends JpaRepository<ServiceResource, UUID> {
     List<ServiceResource> findByOfferId(UUID offerId);
+
+    /** finds all active resources — used for Booking Service cache seeding on startup */
+    List<ServiceResource> findByActiveTrue();
 }

@@ -12,6 +12,7 @@ import org.springframework.web.bind.annotation.*;
 
 import jakarta.validation.Valid;
 import java.net.URI;
+import java.util.List;
 import java.util.UUID;
 
 @Tag(
@@ -66,6 +67,17 @@ public class ServiceResourceController {
                 .orElse(ResponseEntity.notFound().build());
     }
 
+    /**
+     * Returns all active resources.
+     * Used by the Booking Service on startup to seed its local resource cache.
+     */
+    @Operation(summary = "Get all active resources")
+    @ApiResponse(responseCode = "200", description = "List of active resources")
+    @GetMapping
+    public ResponseEntity<List<ServiceResourceResponseDTO>> getAllActive() {
+        return ResponseEntity.ok(service.getAllActive());
+    }
+
 /*    *//**
      * Deletes a resource by its ID.
      *
@@ -117,7 +129,7 @@ public class ServiceResourceController {
                 .map(ResponseEntity::ok)
                 .orElse(ResponseEntity.notFound().build());
     }
-    
+
     /**
      * Updates stable data of a service resource — name, price, duration.
      * Returns HTTP 200 with the updated resource, or HTTP 404 if not found.
@@ -136,4 +148,5 @@ public class ServiceResourceController {
                 .map(ResponseEntity::ok)
                 .orElse(ResponseEntity.notFound().build());
     }
+
 }

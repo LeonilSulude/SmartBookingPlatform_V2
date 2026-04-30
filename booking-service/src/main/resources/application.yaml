@@ -15,6 +15,16 @@ spring:
 
   defer-datasource-initialization: true  # ensures Flyway runs migrations before Hibernate validates the schema
 
+  kafka:
+    bootstrap-servers: localhost:9092  # Kafka broker address
+    consumer:
+      group-id: booking-service        # consumer group — ensures each event is processed once per group
+      auto-offset-reset: earliest      # read from beginning if no committed offset exists — important for cold start
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "leonil.sulude.catalog.dto"  # allow deserialization of Catalog DTOs
+        spring.json.value.default.type: "leonil.sulude.booking.dto.ResourceCacheEventDTO"  # default deserialization target
 server:
   port: 8083
 

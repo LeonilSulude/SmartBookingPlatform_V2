@@ -38,6 +38,13 @@ public interface ServiceResourceService {
      */
     Optional<ServiceResourceResponseDTO> getById(UUID id);
 
+    /**
+     * Returns all active resources — used by Booking Service on startup to seed the local cache.
+     *
+     * @return list of active resources
+     */
+    List<ServiceResourceResponseDTO> getAllActive();
+
 /*    *//**
      * Deletes a service resource by its unique ID.
      *
