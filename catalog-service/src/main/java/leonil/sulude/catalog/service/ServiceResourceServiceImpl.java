@@ -1,9 +1,6 @@
 package leonil.sulude.catalog.service;
 
-import leonil.sulude.catalog.dto.ResourceEventDTO;
-import leonil.sulude.catalog.dto.ServiceResourceRequestDTO;
-import leonil.sulude.catalog.dto.ServiceResourceResponseDTO;
-import leonil.sulude.catalog.dto.UnavailablePeriodDTO;
+import leonil.sulude.catalog.dto.*;
 import leonil.sulude.catalog.messaging.ResourceEventProducer;
 import leonil.sulude.catalog.messaging.ResourceEventType;
 import leonil.sulude.catalog.model.ServiceOffer;
@@ -145,6 +142,27 @@ public class ServiceResourceServiceImpl implements ServiceResourceService {
                 });
     }
 
+    @Override
+    public Optional<ServiceResourceResponseDTO> activate(UUID id) {
+        return repository.findById(id)
+                .map(resource -> {
+                    resource.setActive(true);
+                    ServiceResource saved = repository.save(resource);
+
+                    // notify Booking Service to mark this resource as active in its cache
+                    eventProducer.publish(new ResourceEventDTO(
+                            ResourceEventType.RESOURCE_ACTIVATED,
+                            saved.getId(),
+                            saved.getName(),
+                            saved.getPrice(),
+                            saved.getDurationInMinutes(),
+                            saved.isActive()
+                    ));
+
+                    return toResponseDTO(saved);
+                });
+    }
+
     /**
      * Helper method to convert entity to DTO.
      */
@@ -159,5 +177,32 @@ public class ServiceResourceServiceImpl implements ServiceResourceService {
                         .map(p -> new UnavailablePeriodDTO(p.getStartTime(), p.getEndTime()))
                         .toList()
         );
+    }
+
+    /**
+     * Updates stable resource data and publishes RESOURCE_UPDATED to Kafka.
+     * The Booking Service consumes this event to refresh its local resource cache.
+     */
+    @Override
+    public Optional<ServiceResourceResponseDTO> update(UUID id, ServiceResourceUpdateDTO dto) {
+        return repository.findById(id)
+                .map(resource -> {
+                    resource.setName(dto.name());
+                    resource.setPrice(dto.price());
+                    resource.setDurationInMinutes(dto.durationInMinutes());
+                    ServiceResource saved = repository.save(resource);
+
+                    // notify Booking Service to update this resource in its local cache
+                    eventProducer.publish(new ResourceEventDTO(
+                            ResourceEventType.RESOURCE_UPDATED,
+                            saved.getId(),
+                            saved.getName(),
+                            saved.getPrice(),
+                            saved.getDurationInMinutes(),
+                            saved.isActive()
+                    ));
+
+                    return toResponseDTO(saved);
+                });
     }
 }

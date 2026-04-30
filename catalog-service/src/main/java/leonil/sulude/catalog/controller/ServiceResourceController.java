@@ -5,6 +5,7 @@ import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import leonil.sulude.catalog.dto.ServiceResourceRequestDTO;
 import leonil.sulude.catalog.dto.ServiceResourceResponseDTO;
+import leonil.sulude.catalog.dto.ServiceResourceUpdateDTO;
 import leonil.sulude.catalog.service.ServiceResourceService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -96,6 +97,42 @@ public class ServiceResourceController {
     @PatchMapping("/{id}/deactivate")
     public ResponseEntity<ServiceResourceResponseDTO> deactivate(@PathVariable UUID id) {
         return service.deactivate(id)
+                .map(ResponseEntity::ok)
+                .orElse(ResponseEntity.notFound().build());
+    }
+
+    /**
+     * Activates a previously deactivated resource.
+     * Returns HTTP 200 with the updated resource, or HTTP 404 if not found.
+     */
+    @Operation(
+            summary = "Activate a service resource",
+            description = "Marks a previously deactivated resource as active."
+    )
+    @ApiResponse(responseCode = "200", description = "Resource activated successfully")
+    @ApiResponse(responseCode = "404", description = "Resource not found")
+    @PatchMapping("/{id}/activate")
+    public ResponseEntity<ServiceResourceResponseDTO> activate(@PathVariable UUID id) {
+        return service.activate(id)
+                .map(ResponseEntity::ok)
+                .orElse(ResponseEntity.notFound().build());
+    }
+    
+    /**
+     * Updates stable data of a service resource — name, price, duration.
+     * Returns HTTP 200 with the updated resource, or HTTP 404 if not found.
+     */
+    @Operation(
+            summary = "Update a service resource",
+            description = "Updates name, price, and duration. Use /deactivate to deactivate a resource."
+    )
+    @ApiResponse(responseCode = "200", description = "Resource updated successfully")
+    @ApiResponse(responseCode = "404", description = "Resource not found")
+    @PutMapping("/{id}")
+    public ResponseEntity<ServiceResourceResponseDTO> update(
+            @PathVariable UUID id,
+            @Valid @RequestBody ServiceResourceUpdateDTO dto) {
+        return service.update(id, dto)
                 .map(ResponseEntity::ok)
                 .orElse(ResponseEntity.notFound().build());
     }

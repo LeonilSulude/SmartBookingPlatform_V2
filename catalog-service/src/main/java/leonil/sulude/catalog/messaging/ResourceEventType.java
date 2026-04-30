@@ -7,5 +7,6 @@ package leonil.sulude.catalog.messaging;
 public enum ResourceEventType {
     RESOURCE_CREATED,
     RESOURCE_UPDATED,
-    RESOURCE_DEACTIVATED
+    RESOURCE_ACTIVATED,    // resource marked as active
+    RESOURCE_DEACTIVATED   // resource marked as inactive
 }

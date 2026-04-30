@@ -2,6 +2,7 @@ package leonil.sulude.catalog.service;
 
 import leonil.sulude.catalog.dto.ServiceResourceRequestDTO;
 import leonil.sulude.catalog.dto.ServiceResourceResponseDTO;
+import leonil.sulude.catalog.dto.ServiceResourceUpdateDTO;
 import leonil.sulude.catalog.model.ServiceResource;
 
 import java.util.List;
@@ -51,4 +52,23 @@ public interface ServiceResourceService {
      * @return the updated resource, or empty if not found
      */
     Optional<ServiceResourceResponseDTO> deactivate(UUID id);
+
+    /**
+     * Activates a previously deactivated resource.
+     * Publishes RESOURCE_UPDATED event so the Booking Service cache reflects the new active state.
+     *
+     * @param id the resource ID
+     * @return the updated resource, or empty if not found
+     */
+    Optional<ServiceResourceResponseDTO> activate(UUID id);
+
+    /**
+     * Updates stable data of an existing resource — name, price, duration.
+     * Publishes RESOURCE_UPDATED event to Kafka so the Booking Service cache is refreshed.
+     *
+     * @param id  the resource ID
+     * @param dto the update request
+     * @return the updated resource, or empty if not found
+     */
+    Optional<ServiceResourceResponseDTO> update(UUID id, ServiceResourceUpdateDTO dto);
 }
