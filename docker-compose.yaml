@@ -74,6 +74,30 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: true
 
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: prometheus-v2
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml  # scrape configuration
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: grafana-v2
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin  # default login password
+    depends_on:
+      - prometheus
+
+  zipkin:
+    image: openzipkin/zipkin:3.3
+    container_name: zipkin-v2
+    ports:
+      - "9411:9411"  # Zipkin UI and API
+
 
 
 volumes:
