@@ -5,8 +5,6 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.kafka.KafkaContainer;
 import org.testcontainers.utility.DockerImageName;
 
@@ -18,30 +16,40 @@ import static com.github.tomakehurst.wiremock.client.WireMock.resetAllRequests;
  * Also starts a WireMock server to simulate the Catalog Service --- the Booking Service
  * is tested in isolation, without requiring the real Catalog Service to be running.
  *
- * WireMock is started in a static block, not @BeforeEach --- ApplicationReadyEvent
- * (which triggers ResourceCacheSeeder) fires while the Spring context is loading,
- * which happens before any @BeforeEach method runs. Starting WireMock statically
- * guarantees it is already listening before the context --- and the seeder --- starts.
+ * SINGLETON CONTAINER PATTERN: Postgres, Kafka, and WireMock are all started manually in a
+ * static block --- NOT via @Container/@Testcontainers lifecycle management. This is deliberate.
+ *
+ * With @Container on a static field, JUnit 5 starts the container once per TEST CLASS
+ * (beforeAll) and stops it once that class's tests finish (afterAll). Because all IT classes
+ * inherit the same static field from this abstract class, the first class to finish would stop
+ * the container --- and every subsequent IT class would fail with "Connection refused", since
+ * it inherits the same (now-dead) container reference. This was observed directly: three
+ * integration tests passed individually but failed with 500 errors and Postgres connection
+ * refused when run together in the same Maven execution.
+ *
+ * The fix is the pattern Testcontainers itself documents for cross-class reuse: start the
+ * container manually and never call stop() --- the Ryuk sidecar container cleans everything
+ * up automatically when the JVM exits, regardless of how many test classes shared it.
  */
-@Testcontainers
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 public abstract class AbstractIntegrationTest {
 
-    @Container
-    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>(
-            DockerImageName.parse("postgres:16"))
-            .withDatabaseName("booking_test")
-            .withUsername("test_user")
-            .withPassword("test_pass");
-
-    @Container
-    static KafkaContainer kafka = new KafkaContainer(
-            DockerImageName.parse("apache/kafka:3.7.0")
-                    .asCompatibleSubstituteFor("confluentinc/cp-kafka"));
-
+    protected static final PostgreSQLContainer<?> postgres;
+    protected static final KafkaContainer kafka;
     protected static final WireMockServer wireMockServer = new WireMockServer(8089);
 
     static {
+        postgres = new PostgreSQLContainer<>(DockerImageName.parse("postgres:16"))
+                .withDatabaseName("booking_test")
+                .withUsername("test_user")
+                .withPassword("test_pass");
+        postgres.start();
+
+        kafka = new KafkaContainer(
+                DockerImageName.parse("apache/kafka:3.7.0")
+                        .asCompatibleSubstituteFor("confluentinc/cp-kafka"));
+        kafka.start();
+
         // started before the Spring context loads — the seeder needs this alive on ApplicationReadyEvent
         wireMockServer.start();
         configureFor("localhost", 8089);

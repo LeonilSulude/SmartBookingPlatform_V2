@@ -54,7 +54,9 @@ public class BookingServiceImpl implements BookingService {
         if (dto.idempotencyKey() != null && !dto.idempotencyKey().isBlank()) {
             Optional<Booking> existing = repository.findByIdempotencyKey(dto.idempotencyKey());
             if (existing.isPresent()) {
-                // return the original response without creating a duplicate
+                // return the original response without creating a duplicate.
+                // uses the display-only resolution — no need for real-time unavailablePeriods
+                // when simply returning a booking that was already validated and confirmed
                 return mapToResponseDTO(existing.get());
             }
         }
@@ -66,7 +68,9 @@ public class BookingServiceImpl implements BookingService {
             throw new BookingConflictException("Resource is already booked during this time.");
         }
 
-        // resolve resource — local cache first, fallback to Catalog via OpenFeign on cache miss
+        // resolve resource — local cache first, fallback to Catalog via OpenFeign on cache miss.
+        // this is the ONLY path that needs resolveResource() with real-time unavailablePeriods —
+        // creating a new booking is the one operation where stale availability data is dangerous
         ServiceResourceResponseDTO resource = resolveResource(dto.resourceId());
 
         if (resource == null || !resource.active()) {
@@ -122,8 +126,9 @@ public class BookingServiceImpl implements BookingService {
     }
 
     private BookingResponseDTO mapToResponseDTO(Booking booking) {
-        // use cache for stable data — avoids Catalog call for every booking in list
-        ServiceResourceResponseDTO resource = resolveResource(booking.getResourceId());
+        // display path — cache-only when possible, no Catalog call for unavailablePeriods.
+        // showing an existing booking doesn't need real-time availability data
+        ServiceResourceResponseDTO resource = resolveResourceForDisplay(booking.getResourceId());
 
         return new BookingResponseDTO(
                 booking.getId(),
@@ -147,6 +152,10 @@ public class BookingServiceImpl implements BookingService {
      *
      * Unavailable periods are always fetched from Catalog — they are time-sensitive
      * and cannot tolerate staleness without risking double-booking.
+     *
+     * Use this ONLY when about to validate and create a new booking. For displaying
+     * existing bookings, use resolveResourceForDisplay() instead — it skips the
+     * unnecessary Catalog call for unavailablePeriods that a display-only read doesn't need.
      */
     private ServiceResourceResponseDTO resolveResource(UUID resourceId) {
         // check local cache first
@@ -183,6 +192,47 @@ public class BookingServiceImpl implements BookingService {
     }
 
     /**
+     * Resolves resource data for DISPLAY purposes only — cache first, Catalog only on cache miss.
+     * Unlike resolveResource(), this never calls Catalog just for unavailablePeriods when the
+     * cache already has the resource — an existing booking being displayed does not need
+     * real-time availability data, only the create() path does.
+     *
+     * Discovered via an integration test: the idempotency-key short-circuit in create()
+     * was calling Catalog a second time through mapToResponseDTO(), an unnecessary network
+     * call that unit tests (which mock the Catalog client) never surfaced.
+     */
+    private ServiceResourceResponseDTO resolveResourceForDisplay(UUID resourceId) {
+        Optional<ResourceCache> cached = resourceCacheRepository.findById(resourceId);
+
+        if (cached.isPresent()) {
+            ResourceCache cache = cached.get();
+            return new ServiceResourceResponseDTO(
+                    cache.getId(),
+                    cache.getName(),
+                    cache.getPrice(),
+                    cache.getDurationInMinutes(),
+                    cache.isActive(),
+                    List.of() // not needed for display — no Catalog call made
+            );
+        }
+
+        // cache miss even for display — fall back to Catalog and populate cache, same as resolveResource()
+        ServiceResourceResponseDTO resource = fetchResource(resourceId);
+        if (resource != null) {
+            ResourceCache newEntry = ResourceCache.builder()
+                    .id(resource.id())
+                    .name(resource.name())
+                    .price(resource.price())
+                    .durationInMinutes(resource.durationInMinutes())
+                    .active(resource.active())
+                    .lastUpdated(LocalDateTime.now())
+                    .build();
+            resourceCacheRepository.save(newEntry);
+        }
+        return resource;
+    }
+
+    /**
      * Retrieves resource data from the Catalog Service.
      * Protected by Resilience4j retry and circuit breaker mechanisms
      * to improve reliability of inter-service communication.
@@ -200,4 +250,5 @@ public class BookingServiceImpl implements BookingService {
     public ServiceResourceResponseDTO catalogFallback(UUID resourceId, Throwable ex) {
         throw new ResourceUnavailableException("Catalog service unavailable");
     }
+
 }
