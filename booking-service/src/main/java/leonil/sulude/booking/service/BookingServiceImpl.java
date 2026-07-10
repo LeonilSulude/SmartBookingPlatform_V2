@@ -5,6 +5,7 @@ import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import leonil.sulude.booking.dto.BookingRequestDTO;
 import leonil.sulude.booking.dto.BookingResponseDTO;
 import leonil.sulude.booking.dto.ServiceResourceResponseDTO;
+import leonil.sulude.booking.exception.BookingCancellationNotAllowedException;
 import leonil.sulude.booking.exception.BookingConflictException;
 import leonil.sulude.booking.exception.ResourceUnavailableException;
 import leonil.sulude.booking.feignclient.CatalogClient;
@@ -26,6 +27,8 @@ public class BookingServiceImpl implements BookingService {
     private final BookingRepository repository;
     private final CatalogClient catalogClient;
     private final ResourceCacheRepository resourceCacheRepository; // local cache of stable resource data from Catalog
+
+    private static final long CANCELLATION_WINDOW_MINUTES = 30; // TODO V3: make configurable per resource type/id
 
     public BookingServiceImpl(BookingRepository repository,
                               CatalogClient catalogClient,
@@ -230,6 +233,34 @@ public class BookingServiceImpl implements BookingService {
             resourceCacheRepository.save(newEntry);
         }
         return resource;
+    }
+
+    /**
+     * Cancels an existing booking.
+     * Idempotent — an already-cancelled booking is returned as-is, no error, so that
+     * a duplicate cancel request (e.g. a double-click or client retry) never surfaces
+     * as a failure to the user who already got what they wanted.
+     * Enforces a minimum cancellation window before the booking's start time.
+     */
+    @Override
+    public Optional<BookingResponseDTO> cancel(UUID id) {
+        return repository.findById(id)
+                .map(booking -> {
+                    if (booking.getStatus() == BookingStatus.CANCELLED) {
+                        // idempotent — already cancelled, return as-is without error
+                        return mapToResponseDTO(booking);
+                    }
+
+                    if (LocalDateTime.now().isAfter(booking.getStartTime().minusMinutes(CANCELLATION_WINDOW_MINUTES))) {
+                        throw new BookingCancellationNotAllowedException(
+                                "Cancellation is not allowed within " + CANCELLATION_WINDOW_MINUTES +
+                                        " minutes of the booking start time.");
+                    }
+
+                    booking.setStatus(BookingStatus.CANCELLED);
+                    Booking saved = repository.save(booking); // @Version check happens here
+                    return mapToResponseDTO(saved);
+                });
     }
 
     /**

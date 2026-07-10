@@ -103,4 +103,23 @@ public class BookingController {
                 ? ResponseEntity.noContent().build()
                 : ResponseEntity.notFound().build();
     }
+
+    /**
+     * Cancels a booking. Idempotent — cancelling an already-cancelled booking succeeds silently.
+     * Rejects cancellation within 30 minutes of the booking's start time.
+     */
+    @Operation(
+            summary = "Cancel a booking",
+            description = "Cancels a booking. Not allowed within 30 minutes of the scheduled start time."
+    )
+    @ApiResponse(responseCode = "200", description = "Booking cancelled (or already was)")
+    @ApiResponse(responseCode = "400", description = "Cancellation window has passed")
+    @ApiResponse(responseCode = "404", description = "Booking not found")
+    @ApiResponse(responseCode = "409", description = "Concurrent modification conflict")
+    @PatchMapping("/{id}/cancel")
+    public ResponseEntity<BookingResponseDTO> cancel(@PathVariable UUID id) {
+        return service.cancel(id)
+                .map(ResponseEntity::ok)
+                .orElse(ResponseEntity.notFound().build());
+    }
 }

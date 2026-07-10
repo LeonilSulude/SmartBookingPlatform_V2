@@ -219,5 +219,21 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(apiError);
     }
 
+    /**
+     * Handles cancellation attempts too close to the booking's start time.
+     * Returns HTTP 400 — a business rule violation, not a concurrency conflict.
+     */
+    @ExceptionHandler(BookingCancellationNotAllowedException.class)
+    public ResponseEntity<ApiError> handleCancellationNotAllowed(BookingCancellationNotAllowedException ex) {
+        ApiError apiError = new ApiError(
+                HttpStatus.BAD_REQUEST.value(),
+                "Bad Request",
+                ex.getMessage(),
+                LocalDateTime.now(),
+                Collections.emptyList()
+        );
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(apiError);
+    }
+
 
 }
