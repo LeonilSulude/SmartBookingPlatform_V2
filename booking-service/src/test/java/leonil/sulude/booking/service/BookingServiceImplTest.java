@@ -1,12 +1,13 @@
 package leonil.sulude.booking.service;
 
+import leonil.sulude.booking.client.CatalogResourceClient;
 import leonil.sulude.booking.dto.BookingRequestDTO;
 import leonil.sulude.booking.dto.BookingResponseDTO;
 import leonil.sulude.booking.dto.ServiceResourceResponseDTO;
 import leonil.sulude.booking.dto.UnavailablePeriodDTO;
+import leonil.sulude.booking.exception.BookingCancellationNotAllowedException;
 import leonil.sulude.booking.exception.BookingConflictException;
 import leonil.sulude.booking.exception.ResourceUnavailableException;
-import leonil.sulude.booking.feignclient.CatalogClient;
 import leonil.sulude.booking.model.Booking;
 import leonil.sulude.booking.model.BookingStatus;
 import leonil.sulude.booking.repository.BookingRepository;
@@ -27,8 +28,15 @@ import static org.mockito.Mockito.*;
 /**
  * Unit tests for BookingServiceImpl.
  *
- * These tests validate the business logic of booking creation,
+ * These tests validate the business logic of booking creation, cancellation,
  * conflict detection, and deletion using mocked dependencies.
+ *
+ * Mocks CatalogResourceClient, not CatalogClient directly — CatalogResourceClient
+ * is the bean that wraps the Feign call with Resilience4j (@Retry/@CircuitBreaker).
+ * It was extracted into its own class specifically because Spring's proxy-based AOP
+ * cannot intercept self-invocations: keeping fetchResource() as a private method inside
+ * BookingServiceImpl meant the resilience annotations were silently never applied —
+ * discovered via an integration test simulating a real Catalog outage.
  */
 class BookingServiceImplTest {
 
@@ -36,7 +44,7 @@ class BookingServiceImplTest {
     private BookingRepository repository;
 
     @Mock
-    private CatalogClient catalogClient;
+    private CatalogResourceClient catalogResourceClient;
 
     @Mock
     private ResourceCacheRepository resourceCacheRepository; // mocked cache repository
@@ -71,9 +79,8 @@ class BookingServiceImplTest {
         when(repository.existsOverlappingBooking(any(), any(), any()))
                 .thenReturn(false);
 
-        // simulate cache miss — forces fallback to Catalog via OpenFeign
+        // simulate cache miss — forces fallback to Catalog via CatalogResourceClient
         when(resourceCacheRepository.findById(any())).thenReturn(Optional.empty());
-
 
         ServiceResourceResponseDTO resource =
                 new ServiceResourceResponseDTO(
@@ -85,7 +92,7 @@ class BookingServiceImplTest {
                         List.of()
                 );
 
-        when(catalogClient.getResourceById(resourceId))
+        when(catalogResourceClient.fetchResource(resourceId))
                 .thenReturn(resource);
 
         Booking saved = new Booking();
@@ -153,13 +160,10 @@ class BookingServiceImplTest {
                 null
         );
 
-        // no overlapping bookings exist for the requested time slot
         when(repository.existsOverlappingBooking(any(), any(), any()))
                 .thenReturn(false);
 
-        // simulate cache miss — forces fallback to Catalog via OpenFeign
         when(resourceCacheRepository.findById(any())).thenReturn(Optional.empty());
-
 
         ServiceResourceResponseDTO resource =
                 new ServiceResourceResponseDTO(
@@ -171,7 +175,7 @@ class BookingServiceImplTest {
                         List.of()
                 );
 
-        when(catalogClient.getResourceById(resourceId))
+        when(catalogResourceClient.fetchResource(resourceId))
                 .thenReturn(resource);
 
         assertThrows(
@@ -202,11 +206,9 @@ class BookingServiceImplTest {
                 null
         );
 
-        // no overlapping bookings exist for the requested time slot
         when(repository.existsOverlappingBooking(any(), any(), any()))
                 .thenReturn(false);
 
-        // simulate cache miss — forces fallback to Catalog via OpenFeign
         when(resourceCacheRepository.findById(any())).thenReturn(Optional.empty());
 
         UnavailablePeriodDTO period =
@@ -225,7 +227,7 @@ class BookingServiceImplTest {
                         List.of(period)
                 );
 
-        when(catalogClient.getResourceById(resourceId))
+        when(catalogResourceClient.fetchResource(resourceId))
                 .thenReturn(resource);
 
         assertThrows(
@@ -266,5 +268,101 @@ class BookingServiceImplTest {
         assertFalse(result);
 
         verify(repository, never()).deleteById(any());
+    }
+
+    /**
+     * Tests successful cancellation when the booking is far enough in the future.
+     */
+    @Test
+    void shouldCancelBookingSuccessfully() {
+
+        UUID id = UUID.randomUUID();
+        UUID resourceId = UUID.randomUUID();
+
+        Booking booking = new Booking();
+        booking.setId(id);
+        booking.setResourceId(resourceId);
+        booking.setStatus(BookingStatus.PENDING);
+        booking.setStartTime(LocalDateTime.now().plusDays(1)); // well outside the 30-min window
+
+        when(repository.findById(id)).thenReturn(Optional.of(booking));
+        when(repository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(resourceCacheRepository.findById(resourceId)).thenReturn(Optional.empty());
+        when(catalogResourceClient.fetchResource(resourceId)).thenReturn(
+                new ServiceResourceResponseDTO(resourceId, "Yoga", new BigDecimal("15"), 60, true, List.of()));
+
+        Optional<BookingResponseDTO> result = service.cancel(id);
+
+        assertTrue(result.isPresent());
+        assertEquals(BookingStatus.CANCELLED, result.get().status());
+        verify(repository).save(argThat(b -> b.getStatus() == BookingStatus.CANCELLED));
+    }
+
+    /**
+     * Tests that cancelling an already-cancelled booking is idempotent —
+     * returns the booking as-is, does not throw, does not call save() again.
+     */
+    @Test
+    void shouldBeIdempotentWhenCancellingAlreadyCancelledBooking() {
+
+        UUID id = UUID.randomUUID();
+        UUID resourceId = UUID.randomUUID();
+
+        Booking booking = new Booking();
+        booking.setId(id);
+        booking.setResourceId(resourceId);
+        booking.setStatus(BookingStatus.CANCELLED);
+        booking.setStartTime(LocalDateTime.now().plusDays(1));
+
+        when(repository.findById(id)).thenReturn(Optional.of(booking));
+        when(resourceCacheRepository.findById(resourceId)).thenReturn(Optional.empty());
+        when(catalogResourceClient.fetchResource(resourceId)).thenReturn(
+                new ServiceResourceResponseDTO(resourceId, "Yoga", new BigDecimal("15"), 60, true, List.of()));
+
+        Optional<BookingResponseDTO> result = service.cancel(id);
+
+        assertTrue(result.isPresent());
+        assertEquals(BookingStatus.CANCELLED, result.get().status());
+        verify(repository, never()).save(any()); // idempotent path never writes
+    }
+
+    /**
+     * Tests that cancellation is rejected within the 30-minute cutoff before start time.
+     */
+    @Test
+    void shouldThrowBookingCancellationNotAllowedWhenWithinCancellationWindow() {
+
+        UUID id = UUID.randomUUID();
+
+        Booking booking = new Booking();
+        booking.setId(id);
+        booking.setResourceId(UUID.randomUUID());
+        booking.setStatus(BookingStatus.PENDING);
+        booking.setStartTime(LocalDateTime.now().plusMinutes(10)); // inside the 30-min window
+
+        when(repository.findById(id)).thenReturn(Optional.of(booking));
+
+        assertThrows(
+                BookingCancellationNotAllowedException.class,
+                () -> service.cancel(id)
+        );
+
+        verify(repository, never()).save(any());
+    }
+
+    /**
+     * Tests that cancelling a non-existent booking returns empty, not an exception.
+     */
+    @Test
+    void shouldReturnEmptyWhenCancellingNonExistentBooking() {
+
+        UUID id = UUID.randomUUID();
+
+        when(repository.findById(id)).thenReturn(Optional.empty());
+
+        Optional<BookingResponseDTO> result = service.cancel(id);
+
+        assertTrue(result.isEmpty());
+        verify(repository, never()).save(any());
     }
 }
