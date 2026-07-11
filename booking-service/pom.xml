@@ -205,6 +205,15 @@
 			<version>3.9.1</version>
 			<scope>test</scope>
 		</dependency>
+
+		<!-- Awaitility — polling assertions for asynchronous behaviour (e.g. Kafka consumer
+     	processing a message on a separate thread); a normal assertion right after
+     	publishing would race the consumer and fail intermittently -->
+		<dependency>
+			<groupId>org.awaitility</groupId>
+			<artifactId>awaitility</artifactId>
+			<scope>test</scope>
+		</dependency>
 	</dependencies>
 
 	<dependencyManagement>
@@ -244,6 +253,28 @@
 						</exclude>
 					</excludes>
 				</configuration>
+			</plugin>
+			<plugin>
+				<groupId>org.jacoco</groupId>
+				<artifactId>jacoco-maven-plugin</artifactId>
+				<version>0.8.12</version>
+				<executions>
+					<!-- attaches the JaCoCo Java agent to the JVM running the tests,
+                         so it can record which lines/branches actually execute -->
+					<execution>
+						<goals>
+							<goal>prepare-agent</goal>
+						</goals>
+					</execution>
+					<!-- generates the HTML/XML report after tests finish -->
+					<execution>
+						<id>report</id>
+						<phase>test</phase>
+						<goals>
+							<goal>report</goal>
+						</goals>
+					</execution>
+				</executions>
 			</plugin>
 		</plugins>
 	</build>

@@ -1,12 +1,18 @@
 package leonil.sulude.booking.integration;
 
 import com.github.tomakehurst.wiremock.WireMockServer;
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.serialization.StringSerializer;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.kafka.KafkaContainer;
 import org.testcontainers.utility.DockerImageName;
+
+import java.util.Properties;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.configureFor;
 
@@ -83,5 +89,27 @@ public abstract class AbstractIntegrationTest {
         // override the Feign client URL — bypasses Eureka discovery, points directly to WireMock
         registry.add("spring.cloud.openfeign.client.config.catalog-service.url",
                 () -> "http://localhost:8089");
+    }
+
+    /**
+     * Publishes a raw JSON message to a Kafka topic, simulating an event published by
+     * another service (e.g. the Catalog Service's real ResourceEventProducer). Used to
+     * test ResourceEventConsumer's @KafkaListener directly and for real, rather than only
+     * indirectly through the OpenFeign cache-miss path that other Booking tests exercise.
+     *
+     * @param topic the topic to publish to
+     * @param key   the message key (Catalog uses resourceId as key, for per-resource ordering)
+     * @param value the raw JSON payload
+     */
+    protected void publishMessage(String topic, String key, String value) {
+        Properties props = new Properties();
+        props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, kafka.getBootstrapServers());
+        props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
+        props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
+
+        try (KafkaProducer<String, String> producer = new KafkaProducer<>(props)) {
+            producer.send(new ProducerRecord<>(topic, key, value));
+            producer.flush();
+        }
     }
 }
