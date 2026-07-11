@@ -65,10 +65,25 @@ class JwtValidationIT {
                 .signWith(key)
                 .compact();
 
-        // flip a character in the signature segment — token structurally looks valid
-        // (still three base64 segments) but the signature no longer matches the payload
-        String tamperedToken = validToken.substring(0, validToken.length() - 1)
-                + (validToken.endsWith("A") ? "B" : "A");
+        // flip a character roughly in the middle of the token — for a typical JWT
+        // (header.payload.signature) this index usually lands within the payload segment,
+        // since it's normally the longest part. Changing the payload guarantees the
+        // signature (computed over the ORIGINAL header+payload) no longer matches,
+        // deterministically — no dependency on base64 padding luck.
+        // Contrast with the previous version of this test, which flipped only the LAST
+        // character of the whole token (landing in the signature segment): a JWT signature
+        // is 256 bits, base64-encoded 6 bits per character, so its final character can fall
+        // on a "don't care" padding boundary with no real information in it. Flipping that
+        // exact character sometimes left the underlying signature bytes unchanged, making
+        // the "tampered" token still valid — and since the JWT is timestamped fresh on every
+        // run, whether the last character happened to be meaningful or padding varied from
+        // run to run, making the old test flaky rather than reliably red.
+        int tamperIndex = validToken.length() / 2;
+        char originalChar = validToken.charAt(tamperIndex);
+        char replacementChar = originalChar == 'A' ? 'B' : 'A';
+        String tamperedToken = validToken.substring(0, tamperIndex)
+                + replacementChar
+                + validToken.substring(tamperIndex + 1);
 
         webTestClient.get()
                 .uri("/api/bookings")
