@@ -1,7 +1,7 @@
-package leonil.sulude.booking.logging;
+package leonil.sulude.auth.logging;
 
-import leonil.sulude.booking.integration.AbstractIntegrationTest;
-import leonil.sulude.booking.logging.dto.LogEventMessage;
+import leonil.sulude.auth.integration.AbstractIntegrationTest;
+import leonil.sulude.auth.logging.dto.LogEventMessage;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -18,11 +18,11 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
  * Integration test for LogEventProducer, using a real RabbitMQ broker via Testcontainers.
  * See catalog-service's LogEventProducerTest for the full rationale — same pattern here.
  *
- * Extends AbstractIntegrationTest to reuse the shared Postgres/Kafka singleton containers,
+ * Extends AbstractIntegrationTest to reuse the shared Postgres singleton container,
  * and adds its own RabbitMQ container following the same singleton pattern.
  *
  * Note: as with the other services, LogEventProducer.send() is never actually invoked
- * from any business code path in the Booking Service — see the report for this documented
+ * from any business code path in the Auth Service — see the report for this documented
  * gap and the V3 direction (consolidating audit logging as an additional Kafka consumer
  * group on existing business topics, removing RabbitMQ entirely).
  */
@@ -49,7 +49,7 @@ class LogEventProducerTest extends AbstractIntegrationTest {
     @Test
     void shouldPublishLogEventToRabbitMQ() {
         LogEventMessage event = LogEventMessage.builder()
-                .serviceName("booking-service")
+                .serviceName("auth-service")
                 .eventType("TEST_EVENT")
                 .level("INFO")
                 .message("This is a test log event")

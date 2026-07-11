@@ -9,7 +9,6 @@ import org.testcontainers.kafka.KafkaContainer;
 import org.testcontainers.utility.DockerImageName;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.configureFor;
-import static com.github.tomakehurst.wiremock.client.WireMock.resetAllRequests;
 
 /**
  * Base class for integration tests requiring real PostgreSQL and Kafka.
@@ -66,10 +65,12 @@ public abstract class AbstractIntegrationTest {
 
     @org.junit.jupiter.api.BeforeEach
     void resetWireMockRequestLog() {
-        // clears the request history so verify() counts are accurate per test —
-        // stub mappings themselves (what to respond with) are untouched, so the
-        // seeder's /api/resources stub keeps working across all tests in this class
-        resetAllRequests();
+        // instance method, not the static WireMock.resetAllRequests() — the static version
+        // relies on a JVM-global "default client" configured via configureFor(), which any
+        // OTHER test class's own configureFor() call (e.g. ResourceCacheSeederFailureIT's
+        // isolated WireMock on a different port) can silently overwrite. Calling reset directly
+        // on this specific server instance avoids depending on that shared global state entirely.
+        wireMockServer.resetRequests();
     }
 
     @DynamicPropertySource
