@@ -19,46 +19,51 @@ public class SecurityConfig {
     /**
      * Main security configuration bean for Spring WebFlux.
      *
-     * Defines:
-     * - What paths are public
-     * - What filter handles authentication (JWT filter)
-     * - Stateless security behavior (no sessions)
+     * IMPORTANT — rule ordering: authorizeExchange() evaluates rules in the order they
+     * are declared and stops at the FIRST match, like a chain of if/else, not "most
+     * specific wins". A previous version placed pathMatchers("/**").hasAuthority("ADMIN")
+     * BEFORE the PROVIDER/CLIENT-specific rules — since "/**" matches every path, it
+     * silently intercepted every request before the more specific rules could ever be
+     * reached, meaning only ADMIN could access anything beyond the public routes. This
+     * was discovered via RoleBasedAuthorizationIT and confirmed manually via Postman
+     * against the gateway (not a direct call to a downstream service, which bypasses
+     * this filter chain entirely). Specific rules must always be declared before
+     * general/catch-all ones.
      */
     @Bean
     public SecurityWebFilterChain securityWebFilterChain(ServerHttpSecurity http) {
         return http
-                // Disable CSRF since this is an API Gateway and uses tokens
                 .csrf(ServerHttpSecurity.CsrfSpec::disable)
-
-                // Disable default login page or basic auth
                 .httpBasic(ServerHttpSecurity.HttpBasicSpec::disable)
                 .formLogin(ServerHttpSecurity.FormLoginSpec::disable)
 
-                // Define route rules
                 .authorizeExchange(exchanges -> exchanges
                         // public endpoints — no token required
                         .pathMatchers("/api/auth/**").permitAll()
                         .pathMatchers("/actuator/**").permitAll()
                         .pathMatchers("/test").permitAll()
 
-                        // ADMIN has full access to all routes
-                        .pathMatchers("/**").hasAuthority("ADMIN")
+                        // ADMIN can also perform these actions — declared alongside the
+                        // role that primarily owns each action, via hasAnyAuthority(),
+                        // rather than as a separate catch-all rule that would shadow
+                        // everything declared after it
+                        .pathMatchers(HttpMethod.POST, "/api/offers/**", "/api/resources/**")
+                        .hasAnyAuthority("PROVIDER", "ADMIN")
+                        .pathMatchers(HttpMethod.DELETE, "/api/offers/**", "/api/resources/**")
+                        .hasAnyAuthority("PROVIDER", "ADMIN")
 
-                        // only PROVIDER can manage offers and resources
-                        .pathMatchers(HttpMethod.POST, "/api/offers/**", "/api/resources/**").hasAuthority("PROVIDER")
-                        .pathMatchers(HttpMethod.DELETE, "/api/offers/**", "/api/resources/**").hasAuthority("PROVIDER")
+                        .pathMatchers(HttpMethod.POST, "/api/bookings/**")
+                        .hasAnyAuthority("CLIENT", "ADMIN")
 
-                        // only CLIENT can create bookings
-                        .pathMatchers(HttpMethod.POST, "/api/bookings/**").hasAuthority("CLIENT")
+                        // authenticated users (any role) can read catalog and bookings
+                        .pathMatchers(HttpMethod.GET, "/api/offers/**", "/api/resources/**", "/api/bookings/**")
+                        .authenticated()
 
-                        // authenticated users can read catalog and their bookings
-                        .pathMatchers(HttpMethod.GET, "/api/offers/**", "/api/resources/**", "/api/bookings/**").authenticated()
-
-                        // everything else requires authentication
+                        // safety net — anything not explicitly matched above still
+                        // requires at least a valid, authenticated token
                         .anyExchange().authenticated()
                 )
 
-                // Apply custom JWT authentication filter
                 .addFilterAt(jwtAuthenticationFilter, SecurityWebFiltersOrder.AUTHENTICATION)
 
                 .build();
