@@ -1,6 +1,7 @@
 package leonil.sulude.shared.security;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpHeaders;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
@@ -30,6 +31,7 @@ import java.util.List;
  *
  * <p><strong>Expected Authorization header format:</strong> {@code Authorization: Bearer <token>}</p>
  */
+@Slf4j
 @Component
 @RequiredArgsConstructor
 public class JwtAuthenticationFilter implements WebFilter {
@@ -60,11 +62,24 @@ public class JwtAuthenticationFilter implements WebFilter {
         // Remove "Bearer " prefix to extract the raw token
         String token = authHeader.substring(7);
 
-        // Extract username/email from token subject claim
-        String username = jwtService.extractUsername(token);
+        // Any parsing/validation failure here (expired, tampered signature, malformed
+        // structure) must be treated as "not authenticated", not as a server error.
+        // isTokenValid() and extractUsername()/extractRole() all ultimately call
+        // JwtService's JWT parser, which throws on invalid tokens — without this
+        // try/catch, that exception propagates unhandled through the reactive chain,
+        // producing an HTTP 500 instead of the expected 401. Discovered via
+        // JwtValidationIT: an expired or tampered token crashed with 500 rather than
+        // being cleanly rejected, because extractUsername() was previously called
+        // before isTokenValid() with no exception handling of its own.
+        try {
+            if (!jwtService.isTokenValid(token)) {
+                return chain.filter(exchange);
+            }
 
-        // If the token is valid and we could extract a user
-        if (username != null && jwtService.isTokenValid(token)) {
+            String username = jwtService.extractUsername(token);
+            if (username == null) {
+                return chain.filter(exchange);
+            }
 
             // extract role from token and wrap as a GrantedAuthority for RBAC
             String role = jwtService.extractRole(token);
@@ -82,9 +97,12 @@ public class JwtAuthenticationFilter implements WebFilter {
             // Add authentication to the reactive context so Spring Security knows the user is authenticated
             return chain.filter(exchange)
                     .contextWrite(ReactiveSecurityContextHolder.withAuthentication(authentication));
-        }
 
-        // If token is invalid, continue without setting security context
-        return chain.filter(exchange);
+        } catch (Exception e) {
+            // token parsing/validation failed — treat as unauthenticated, let
+            // authorizeExchange() reject with a clean 401/403 instead of a 500
+            log.debug("JWT validation failed, treating request as unauthenticated: {}", e.getMessage());
+            return chain.filter(exchange);
+        }
     }
 }
