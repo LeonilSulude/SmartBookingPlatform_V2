@@ -1,0 +1,259 @@
+{
+  "consumer": {
+    "name": "booking-service"
+  },
+  "interactions": [
+    {
+      "description": "a request for all active resources",
+      "providerStates": [
+        {
+          "name": "at least one active resource exists"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/resources"
+      },
+      "response": {
+        "body": [
+
+        ],
+        "generators": {
+          "body": {
+            "$[*].unavailablePeriods[*].endTime": {
+              "format": "yyyy-MM-dd'T'HH:mm:ss",
+              "type": "DateTime"
+            },
+            "$[*].unavailablePeriods[*].startTime": {
+              "format": "yyyy-MM-dd'T'HH:mm:ss",
+              "type": "DateTime"
+            }
+          }
+        },
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "body": {
+            "$": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 0
+                }
+              ]
+            },
+            "$[*].active": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$[*].durationInMinutes": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            },
+            "$[*].id": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "[0-9a-fA-F-]{36}"
+                }
+              ]
+            },
+            "$[*].name": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$[*].price": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "decimal"
+                }
+              ]
+            },
+            "$[*].unavailablePeriods": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 0
+                }
+              ]
+            },
+            "$[*].unavailablePeriods[*].endTime": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "format": "yyyy-MM-dd'T'HH:mm:ss",
+                  "match": "timestamp"
+                }
+              ]
+            },
+            "$[*].unavailablePeriods[*].startTime": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "format": "yyyy-MM-dd'T'HH:mm:ss",
+                  "match": "timestamp"
+                }
+              ]
+            }
+          }
+        },
+        "status": 200
+      }
+    },
+    {
+      "description": "a request for a resource that does not exist",
+      "providerStates": [
+        {
+          "name": "no resource exists with id e2b1a7d0-1a2b-4c3d-8e9f-0a1b2c3d4e5f"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/resources/e2b1a7d0-1a2b-4c3d-8e9f-0a1b2c3d4e5f"
+      },
+      "response": {
+        "status": 404
+      }
+    },
+    {
+      "description": "a request for an existing resource",
+      "providerStates": [
+        {
+          "name": "resource e2b1a7d0-1a2b-4c3d-8e9f-0a1b2c3d4e5f exists"
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/api/resources/e2b1a7d0-1a2b-4c3d-8e9f-0a1b2c3d4e5f"
+      },
+      "response": {
+        "body": {
+          "active": true,
+          "durationInMinutes": 45,
+          "id": "e2b1a7d0-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
+          "name": "Haircut Deluxe",
+          "price": 35.0,
+          "unavailablePeriods": [
+
+          ]
+        },
+        "generators": {
+          "body": {
+            "$.unavailablePeriods[*].endTime": {
+              "format": "yyyy-MM-dd'T'HH:mm:ss",
+              "type": "DateTime"
+            },
+            "$.unavailablePeriods[*].startTime": {
+              "format": "yyyy-MM-dd'T'HH:mm:ss",
+              "type": "DateTime"
+            }
+          }
+        },
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "body": {
+            "$.active": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.durationInMinutes": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            },
+            "$.id": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "[0-9a-fA-F-]{36}"
+                }
+              ]
+            },
+            "$.name": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.price": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "decimal"
+                }
+              ]
+            },
+            "$.unavailablePeriods": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 0
+                }
+              ]
+            },
+            "$.unavailablePeriods[*].endTime": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "format": "yyyy-MM-dd'T'HH:mm:ss",
+                  "match": "timestamp"
+                }
+              ]
+            },
+            "$.unavailablePeriods[*].startTime": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "format": "yyyy-MM-dd'T'HH:mm:ss",
+                  "match": "timestamp"
+                }
+              ]
+            }
+          }
+        },
+        "status": 200
+      }
+    }
+  ],
+  "metadata": {
+    "pact-jvm": {
+      "version": "4.6.9"
+    },
+    "pactSpecification": {
+      "version": "3.0.0"
+    }
+  },
+  "provider": {
+    "name": "catalog-service"
+  }
+}

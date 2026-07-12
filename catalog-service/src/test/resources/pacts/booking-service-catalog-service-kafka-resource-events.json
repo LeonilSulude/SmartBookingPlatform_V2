@@ -1,0 +1,98 @@
+{
+  "consumer": {
+    "name": "booking-service"
+  },
+  "messages": [
+    {
+      "contents": {
+        "active": true,
+        "durationInMinutes": 45,
+        "eventType": "RESOURCE_CREATED",
+        "name": "Haircut Deluxe",
+        "price": 35.0,
+        "resourceId": "e2490de5-5bd3-43d5-b7c4-526e33f71304"
+      },
+      "description": "a resource created event",
+      "generators": {
+        "body": {
+          "$.resourceId": {
+            "type": "Uuid"
+          }
+        }
+      },
+      "matchingRules": {
+        "body": {
+          "$.active": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "type"
+              }
+            ]
+          },
+          "$.durationInMinutes": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "integer"
+              }
+            ]
+          },
+          "$.eventType": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "RESOURCE_CREATED|RESOURCE_UPDATED|RESOURCE_ACTIVATED|RESOURCE_DEACTIVATED"
+              }
+            ]
+          },
+          "$.name": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "type"
+              }
+            ]
+          },
+          "$.price": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "decimal"
+              }
+            ]
+          },
+          "$.resourceId": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+              }
+            ]
+          }
+        }
+      },
+      "metaData": {
+        "contentType": "application/json"
+      },
+      "providerStates": [
+        {
+          "name": "a resource was created in Catalog"
+        }
+      ]
+    }
+  ],
+  "metadata": {
+    "pact-jvm": {
+      "version": "4.6.9"
+    },
+    "pactSpecification": {
+      "version": "3.0.0"
+    }
+  },
+  "provider": {
+    "name": "catalog-service-kafka-resource-events"
+  }
+}
