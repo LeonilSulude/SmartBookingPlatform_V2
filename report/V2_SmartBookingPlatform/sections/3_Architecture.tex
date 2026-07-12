@@ -1,0 +1,77 @@
+\section{System Architecture --- What Changed}
+
+The core architecture of the SmartBookingPlatform remains unchanged from V1: six independent microservices, each owning its own database, communicating through REST APIs, registered with a Eureka Discovery Server, and accessed exclusively through an API Gateway. This chapter does not repeat that foundation. It documents what changed, why it changed, and what the system looks like after those changes.
+
+\subsection{Service Inventory}
+
+The six services from V1 are preserved in V2:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{ll}
+\toprule
+\textbf{Service} & \textbf{Responsibility} \\
+\midrule
+API Gateway & Single entry point --- routing, JWT validation, RBAC enforcement \\
+Auth Service & User registration, authentication, JWT token generation \\
+Catalog Service & Management of service offers and bookable resources \\
+Booking Service & Booking creation, availability validation, conflict detection \\
+Log Service & Centralised log consumption from RabbitMQ \\
+Discovery Service & Service registry using Netflix Eureka \\
+\bottomrule
+\end{tabular}
+\caption{Service inventory --- unchanged from V1}
+\end{table}
+
+\subsection{What Changed at the Architecture Level}
+
+\subsubsection{Security enforcement moved from passive to active}
+
+In V1, the API Gateway validated the JWT token and set the authenticated user in the security context, but the role claim embedded in the token was never read. All authenticated requests were treated equally, regardless of whether the requester was a \texttt{CLIENT}, \texttt{PROVIDER}, or \texttt{ADMIN}.
+
+In V2, the \texttt{JwtAuthenticationFilter} extracts the role claim and sets it as a
+\texttt{GrantedAuthority}. The \texttt{SecurityWebFilterChain} now enforces route-level
+access control:
+
+\begin{itemize}
+    \item \texttt{ADMIN} has full access to all routes
+    \item \texttt{PROVIDER} can create and delete offers and resources
+    \item \texttt{CLIENT} can create bookings
+    \item All authenticated users can read catalog and booking data
+\end{itemize}
+
+Authorization is enforced at the gateway --- the single entry point --- ensuring that
+internal services never receive requests that violate role boundaries.
+
+\subsubsection{Schema management transferred from Hibernate to Flyway}
+
+In V1, all services used \texttt{ddl-auto: create-drop}, which destroyed and recreated the entire schema on every restart. The Log Service used \texttt{ddl-auto: update}, which allowed schema drift without version control.
+
+In V2, all four services with databases --- Auth, Catalog, Booking, and Log --- use Flyway for schema management. Each service has a \texttt{db/migration} directory with versioned SQL scripts. Hibernate is configured to \texttt{validate} only: it verifies that the entity model matches the database schema but never modifies it. Flyway owns schema creation and evolution.
+
+\subsubsection{Asynchronous communication introduced for stable data}
+
+In V1, the Booking Service called the Catalog Service synchronously on every booking request, including to retrieve data that rarely changes --- resource name, price, and duration.
+
+In V2, Kafka is introduced as a second communication channel alongside the existing OpenFeign client. The Catalog Service publishes events (\texttt{ResourceCreated}, \texttt{ResourceUpdated}, \texttt{ResourceDeactivated}) and the Booking Service maintains a local cache of stable resource data. Synchronous calls are retained only for real-time availability validation, where eventual consistency would risk double-booking.
+
+This is a hybrid model: asynchronous for stable data, synchronous for time-sensitive constraints.
+
+\subsubsection{Concurrency protection added to the Booking Service}
+
+In V1, booking conflict detection relied entirely on an application-level overlap check. Under concurrent load, two requests arriving simultaneously could both pass the check before either was persisted --- a race condition that the k6 load tests in V1 exposed but did not resolve.
+
+In V2, two complementary mechanisms protect against this:
+
+\begin{itemize}
+    \item \textbf{Optimistic locking} --- a \texttt{@Version} field on the \texttt{Booking} entity causes Hibernate to detect concurrent modifications and reject the second writer with an \texttt{ObjectOptimisticLockingFailureException}, surfaced to the client as HTTP 409.
+    \item \textbf{Idempotency key} --- clients may include a unique key per request. If the server receives a retry with the same key, it returns the original response without creating a duplicate booking.
+\end{itemize}
+
+\subsection{Architectural Observations}
+
+The V2 changes reinforce the same principles established in V1 --- centralized entry point, service autonomy, loose coupling --- while addressing the gaps that V1 acknowledged but deferred.
+
+The most significant architectural shift is the introduction of Kafka, which changes the communication model from purely synchronous to hybrid. This is not a simple addition: it introduces a new infrastructure component, a new consistency model for part of the data, and new responsibilities for the Booking Service, which now maintains its own local copy of resource data.
+
+The decision to keep synchronous validation for availability is deliberate. Eventual consistency is appropriate when the cost of staleness is low. For availability data, the cost of a stale read is a double-booking --- a direct violation of the system's core business invariant. The hybrid model reflects this distinction.

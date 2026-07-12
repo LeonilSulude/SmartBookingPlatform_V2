@@ -1,0 +1,317 @@
+\section{Testing Strategy}
+\label{sec:testing}
+
+V1 established unit testing as the primary safety net --- 72 tests across three services, all using mocked dependencies. V2 extends this foundation in three directions: real integration testing against actual infrastructure via Testcontainers, end-to-end testing through the real API Gateway, and consumer-driven contract testing with Pact --- the last of which took two sessions, the first stalling on inconsistent library signatures and the second diagnosing and resolving it (Section~\ref{sec:pact}). This section documents what was built, what was discovered, and --- honestly --- what did not work on the first attempt.
+
+\subsection{Why Integration Tests, Given 72 Passing Unit Tests}
+
+V1's unit tests all shared one property: every external dependency was mocked. A \texttt{CatalogClient} mock always returns exactly what the test tells it to return. A mocked \texttt{ResourceCacheRepository} never actually persists anything. This makes unit tests fast and deterministic, but it means they can only verify that the code does what the developer \emph{believes} the dependencies do --- never that it behaves correctly against the real thing.
+
+V2's integration tests close this gap using Testcontainers --- a library that starts real Docker containers (PostgreSQL, Kafka, RabbitMQ) for the duration of a test run. Every service in the platform now has an integration test suite that runs against real infrastructure rather than mocks. As detailed in Section~\ref{sec:bugs-found}, this distinction was not academic: five genuine production bugs were found this way that no unit test, however thorough, could have caught, because each one depended on the real behaviour of a framework or library under real conditions.
+
+\subsection{The Singleton Container Pattern}
+
+The first Testcontainers attempt used JUnit 5's \texttt{@Container} annotation on static fields, following the library's most commonly documented pattern:
+
+\begin{lstlisting}[style=javastyle, language=Java, caption={Initial (incorrect) container lifecycle management}]
+@Container
+static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>(...);
+\end{lstlisting}
+
+With \texttt{@Container} on a static field, JUnit 5 starts the container once before all tests in that class (\texttt{beforeAll}) and stops it once those tests finish (\texttt{afterAll}). This works correctly for a single test class. It fails silently and expensively when multiple test classes inherit the same static field from a shared abstract base class: the \emph{first} class to finish its tests stops the container --- and every subsequent class, still holding a reference to the same (now-dead) static field, fails with \texttt{Connection refused}.
+
+This was discovered directly: three Booking Service integration tests passed individually but failed with PostgreSQL connection errors when run together in the same Maven execution. The fix follows the pattern Testcontainers itself documents for cross-class container reuse --- known as the \emph{singleton container pattern}:
+
+\begin{lstlisting}[style=javastyle, language=Java, caption={Singleton container pattern --- manual lifecycle, no automatic stop}]
+protected static final PostgreSQLContainer<?> postgres;
+protected static final KafkaContainer kafka;
+
+static {
+    postgres = new PostgreSQLContainer<>(DockerImageName.parse("postgres:16"))
+            .withDatabaseName("booking_test")
+            .withUsername("test_user")
+            .withPassword("test_pass");
+    postgres.start();
+
+    kafka = new KafkaContainer(
+            DockerImageName.parse("apache/kafka:3.7.0")
+                    .asCompatibleSubstituteFor("confluentinc/cp-kafka"));
+    kafka.start();
+}
+\end{lstlisting}
+
+Removing \texttt{@Container} and \texttt{@Testcontainers} entirely transfers responsibility for the container lifecycle from JUnit to the test code itself. The container starts once, in a static initializer block, the first time any subclass is loaded by the JVM --- and it is \emph{never} stopped explicitly by any test class. Cleanup is handled by Ryuk, a sidecar container that Testcontainers starts automatically and which destroys all containers it manages when the JVM process exits, regardless of how many test classes shared them.
+
+This pattern was applied consistently across all five services' \texttt{AbstractIntegrationTest} base classes.
+
+\subsection{WireMock for Service Isolation}
+
+The Booking Service depends synchronously on the Catalog Service via OpenFeign. Integration-testing the Booking Service without a running Catalog Service requires simulating that dependency --- WireMock serves this role, standing in for Catalog's HTTP responses.
+
+A subtlety mirrors the container lifecycle lesson: WireMock must be started \emph{before} the Spring context loads, not in a \texttt{@BeforeEach} method. The \texttt{ResourceCacheSeeder} reacts to \texttt{ApplicationReadyEvent}, which fires \emph{during} context initialisation --- before any \texttt{@BeforeEach} method would run. Starting WireMock in \texttt{@BeforeEach} left it not yet listening when the seeder made its first call, causing every integration test run to fail on startup. The fix follows the same static-block pattern already established for the database and message broker containers.
+
+A second, related bug surfaced later: \texttt{AbstractIntegrationTest}'s \texttt{@BeforeEach} reset WireMock's request log using the static convenience method \texttt{WireMock.resetAllRequests()}. This method relies on a JVM-\emph{global} default client configuration set via \texttt{configureFor(host, port)} --- and a separate, unrelated test class (\texttt{ResourceCacheSeederFailureIT}, which runs its own isolated WireMock instance on a different port) called \texttt{configureFor} in its own static initializer. Depending on class-loading order within the same JVM, this silently overwrote the global default, causing \texttt{resetAllRequests()} in unrelated tests to target a closed port belonging to an already-stopped server. The fix was to call \texttt{wireMockServer.resetRequests()} --- an instance method bound to the specific server object --- eliminating the dependency on shared global state entirely.
+
+\subsection{Critical Bugs Discovered via Integration Testing}
+\label{sec:bugs-found}
+
+\subsubsection{Self-Invocation Silently Disabling Resilience4j (and Spring Retry)}
+
+The most structurally significant bug found this phase occurred twice, in two different services, because it stems from a single, non-obvious property of how Spring implements annotations like \texttt{@Retry}, \texttt{@CircuitBreaker}, and \texttt{@Retryable}.
+
+Spring implements these annotations via a dynamic proxy wrapped around the bean. Calls arriving \emph{from outside} the bean pass through this proxy, which applies the retry/circuit-breaker logic before delegating to the real method. Calls made \emph{from within} the same class --- a self-invocation via \texttt{this.method()}, even implicitly --- bypass the proxy entirely, because \texttt{this} refers to the raw, unwrapped object. The annotation is silently ignored: no error, no warning, no difference in behaviour under normal conditions.
+
+\begin{lstlisting}[style=javastyle, language=Java, caption={The bug: fetchResource() called via self-invocation from within the same class}]
+// Inside BookingServiceImpl --- self.fetchResource() never passes through the proxy
+private ServiceResourceResponseDTO resolveResource(UUID resourceId) {
+    ...
+    ServiceResourceResponseDTO fromCatalog = fetchResource(resourceId); // BUG
+    ...
+}
+
+@CircuitBreaker(name = "catalogService", fallbackMethod = "catalogFallback")
+@Retry(name = "catalogService")
+public ServiceResourceResponseDTO fetchResource(UUID resourceId) {
+    return catalogClient.getResourceById(resourceId);
+}
+\end{lstlisting}
+
+This was discovered via \texttt{BookingCatalogResilienceIT}, which simulates a Catalog Service outage using WireMock's connection-reset fault injection and asserts the expected outcome: retries, then a circuit-breaker-triggered fallback, then HTTP 503. Instead, the test received an unhandled HTTP 500 --- the raw Feign exception, propagating with no retry, no circuit breaker, and no fallback ever engaging.
+
+The fix is structural: extract the annotated method into a separate Spring bean, so the call becomes a genuine external invocation that passes through the proxy correctly.
+
+\begin{lstlisting}[style=javastyle, language=Java, caption={Fix: CatalogResourceClient extracted as its own bean}]
+@Component
+@RequiredArgsConstructor
+public class CatalogResourceClient {
+
+    private final CatalogClient catalogClient;
+
+    @CircuitBreaker(name = "catalogService", fallbackMethod = "catalogFallback")
+    @Retry(name = "catalogService")
+    public ServiceResourceResponseDTO fetchResource(UUID resourceId) {
+        return catalogClient.getResourceById(resourceId);
+    }
+
+    public ServiceResourceResponseDTO catalogFallback(UUID resourceId, Throwable ex) {
+        throw new ResourceUnavailableException("Catalog service unavailable");
+    }
+}
+\end{lstlisting}
+
+\texttt{BookingServiceImpl} now injects \texttt{CatalogResourceClient} and calls it as an external dependency. This resolved the bug, and \texttt{BookingCatalogResilienceIT} now correctly observes retries occurring and a clean 503 response.
+
+The identical bug was then found a second time in \texttt{ResourceCacheSeeder}, whose \texttt{@EventListener} method called its own \texttt{@Retryable}-annotated \texttt{attemptSeed()} method via self-invocation. Because Spring Retry uses the same proxy-based mechanism, the effect was the same: no retries occurred, and --- more severely here --- because \texttt{@Recover} also depends on the proxy to intercept the exhausted-retry case, it never fired either. The raw exception propagated out of the \texttt{ApplicationReadyEvent} listener, which Spring Boot treats as a fatal startup error: a Catalog Service outage at Booking Service startup crashed the entire application context, rather than starting gracefully with an empty cache as designed. The fix followed the identical pattern: extracting \texttt{attemptSeed()}/\texttt{recover()} into a new \texttt{ResourceCacheSeedAttempter} bean.
+
+Finding the same bug twice, in two unrelated parts of the codebase, elevated it from an isolated mistake to a pattern worth guarding against systematically. \emph{ArchUnit} is noted as a V3/V4 candidate specifically for this: a rule such as ``no \texttt{@Retryable}-annotated method may be called from within its own class'' could catch this automatically in CI, rather than relying on an integration test happening to exercise the exact failure path.
+
+\subsubsection{API Gateway: A Critical RBAC Rule-Ordering Bug}
+
+The most severe bug of the session, in terms of production impact, was found in the API Gateway's \texttt{SecurityConfig}, via the first automated RBAC test the project has ever had --- closing a gap explicitly flagged in the V1 report: \emph{``JWT validation at the gateway level is tested manually via Postman but not automated.''}
+
+\begin{lstlisting}[style=javastyle, language=Java, caption={The bug --- a catch-all rule placed before role-specific rules}]
+.authorizeExchange(exchanges -> exchanges
+    .pathMatchers("/api/auth/**").permitAll()
+    .pathMatchers("/actuator/**").permitAll()
+    .pathMatchers("/test").permitAll()
+
+    .pathMatchers("/**").hasAuthority("ADMIN")   // matches EVERYTHING
+
+    .pathMatchers(HttpMethod.POST, "/api/offers/**", "/api/resources/**")
+        .hasAuthority("PROVIDER")                 // unreachable
+    .pathMatchers(HttpMethod.POST, "/api/bookings/**")
+        .hasAuthority("CLIENT")                   // unreachable
+    ...
+)
+\end{lstlisting}
+
+Spring Security's \texttt{authorizeExchange()} evaluates rules in declaration order and stops at the \emph{first} match --- behaving like a chain of \texttt{if/else if} statements, not a ``most specific rule wins'' system. Because \texttt{"/**"} matches any path, it intercepted every request before any of the more specific \texttt{PROVIDER}/\texttt{CLIENT} rules could ever be reached. The practical consequence: \textbf{only ADMIN users could access any protected route}. CLIENT and PROVIDER users received HTTP 403 on every business endpoint --- creating offers, creating resources, creating bookings --- despite presenting valid, correctly signed JWTs with the correct role claim.
+
+This bug had existed, undetected, since the security configuration was first written. It was never caught manually because Postman testing during development had been hitting microservices directly on their internal ports (e.g. \texttt{localhost:8082}, \texttt{localhost:8083}) rather than through the gateway on \texttt{localhost:8080} --- bypassing the entire filter chain this bug lived in. This was confirmed directly: a manual Postman request against a microservice's internal port succeeded, while the identical request against the gateway returned \texttt{Access Denied}.
+
+The fix removes the catch-all rule. Each specific rule grants ADMIN access explicitly, alongside its primary role, via \texttt{hasAnyAuthority}:
+
+\begin{lstlisting}[style=javastyle, language=Java, caption={Fix --- ADMIN granted explicitly per rule, no catch-all}]
+.pathMatchers(HttpMethod.POST, "/api/offers/**", "/api/resources/**")
+    .hasAnyAuthority("PROVIDER", "ADMIN")
+.pathMatchers(HttpMethod.POST, "/api/bookings/**")
+    .hasAnyAuthority("CLIENT", "ADMIN")
+.pathMatchers(HttpMethod.GET, "/api/offers/**", "/api/resources/**", "/api/bookings/**")
+    .authenticated()
+.anyExchange().authenticated()  // safety net, not a shadowing catch-all
+\end{lstlisting}
+
+\subsubsection{Unhandled JWT Parsing Exceptions Returning HTTP 500}
+
+A related bug in the same filter: \texttt{JwtAuthenticationFilter} called \texttt{jwtService.extractUsername(token)} \emph{before} calling \texttt{jwtService.isTokenValid(token)}. \texttt{extractUsername} internally parses the JWT via JJWT's \texttt{parseClaimsJws()}, which throws (\texttt{ExpiredJwtException}, \texttt{SignatureException}, etc.) on any invalid token. \texttt{isTokenValid} safely catches these exceptions --- but it was only reached \emph{after} the unprotected call had already thrown. An expired or tampered token crashed with an unhandled HTTP 500 rather than a clean 401.
+
+The fix wraps the filter's token-handling logic in a \texttt{try/catch}, checking validity first and treating any parsing failure as ``not authenticated,'' consistent with how a missing Authorization header is already handled.
+
+\subsubsection{Shared Circuit Breaker State Across Test Classes}
+
+Spring's test framework caches the \texttt{ApplicationContext} across test classes that share an identical configuration signature. \texttt{BookingCatalogResilienceIT} deliberately trips the \texttt{catalogService} circuit breaker to test the fallback path. Because it shares its context configuration with \texttt{BookingConflictIT}, the \emph{same} \texttt{CircuitBreaker} bean --- and its internal state --- was shared between the two classes. Running them together, the circuit breaker (opened by the resilience test) remained open when \texttt{BookingConflictIT} ran next, alphabetically, causing perfectly healthy WireMock-stubbed requests to be short-circuited straight to the fallback, returning 503 instead of the expected 201.
+
+The fix adds an explicit \texttt{@AfterEach} reset of the circuit breaker's state in the test that deliberately trips it, preventing that state from leaking into other test classes sharing the same cached context.
+
+\subsection{A Flaky Test: Base64 Padding and JWT Tampering}
+
+Introducing the Maven Failsafe plugin (Section~\ref{sec:failsafe}) surfaced a test that had passed reliably in isolation but failed intermittently when run alongside other classes --- not due to shared state this time, but due to a genuine flaw in the test's own logic.
+
+\texttt{shouldRejectTokenWithTamperedSignature} tampered with a JWT by flipping only its \emph{last} character:
+
+\begin{lstlisting}[style=javastyle, language=Java, caption={The flaky version --- tampering only the last character}]
+String tamperedToken = validToken.substring(0, validToken.length() - 1)
+        + (validToken.endsWith("A") ? "B" : "A");
+\end{lstlisting}
+
+A JWT signature is 256 bits, Base64-encoded at 6 bits per character. The final character of that encoding sometimes represents only padding bits with no real information --- flipping it, in that case, leaves the underlying signature bytes completely unchanged, and the ``tampered'' token remains, in fact, valid. Since the JWT is generated fresh on every test run with the current timestamp, the resulting signature --- and therefore whether the last character happens to fall on a meaningful bit or a padding boundary --- differs from run to run. This made the test pass or fail unpredictably depending on essentially random timing.
+
+The fix flips a character near the middle of the token instead, which reliably lands within the JWT's payload segment. Modifying the payload guarantees the signature (computed over the original header and payload) no longer matches, deterministically, with no dependency on Base64 padding boundaries.
+
+\subsection{Test Coverage --- JaCoCo}
+
+JaCoCo was added to all five services to measure what proportion of the codebase is actually exercised by the full test suite, independent of how many test scenarios exist. This is a different question from ``do the tests cover the right business scenarios'' --- JaCoCo answers ``is there any code with \emph{no} test touching it at all,'' which intuition alone does not reliably catch.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{Service} & \textbf{Coverage} & \textbf{Notes} \\
+\midrule
+Booking Service & 77\% (up from 68\%) & messaging package closed 3\% $\rightarrow$ 95\% \\
+Catalog Service & 84\% & no critical gaps \\
+Auth Service & 76\% & no critical gaps \\
+Log Service & 96\% & \\
+API Gateway & 94\% & \\
+\bottomrule
+\end{tabular}
+\caption{JaCoCo coverage summary across all services}
+\end{table}
+
+The one genuinely actionable finding was the Booking Service's \texttt{messaging} package --- containing \texttt{ResourceEventConsumer}, the \texttt{@KafkaListener} at the core of the Kafka hybrid model --- sitting at 3\% coverage. Every other integration test exercised the cache indirectly, through OpenFeign cache-miss paths, without ever publishing a real Kafka event and letting the actual listener process it. \texttt{ResourceEventConsumerIT} was added to close this gap directly: publishing real messages for all four event types (\texttt{RESOURCE\_CREATED}, \texttt{RESOURCE\_UPDATED}, \texttt{RESOURCE\_ACTIVATED}, \texttt{RESOURCE\_DEACTIVATED}) and asserting the cache table reflects each correctly, plus an edge case confirming a deactivation event for an unknown resource is safely ignored rather than creating a ghost cache entry. Coverage for the package rose to 95\%.
+
+The remaining lower-coverage areas across services --- exception classes only triggered by the end-to-end suite, Lombok-generated model accessors, static configuration classes --- were judged low-risk and not worth further investment at this stage.
+
+\subsection{Separating Unit and Integration Tests --- Failsafe}
+\label{sec:failsafe}
+
+Before this phase, every test --- unit and integration alike --- ran during Maven's \texttt{test} phase via the Surefire plugin, meaning even a small, isolated code change required Docker to be running before the suite would pass. The Maven Failsafe plugin was introduced to separate these concerns properly, following Maven's intended lifecycle design:
+
+\begin{lstlisting}[style=yamlstyle, caption={Failsafe plugin configuration (added to all five services)}]
+<plugin>
+    <groupId>org.apache.maven.plugins</groupId>
+    <artifactId>maven-failsafe-plugin</artifactId>
+    <executions>
+        <execution>
+            <goals>
+                <goal>integration-test</goal>
+                <goal>verify</goal>
+            </goals>
+        </execution>
+    </executions>
+</plugin>
+\end{lstlisting}
+
+Surefire remains bound to the \texttt{test} phase and only picks up classes matching \texttt{*Test.java}/\texttt{*Tests.java} by convention. Failsafe binds to the later \texttt{integration-test} and \texttt{verify} phases --- which only run after \texttt{package}, i.e. against a built artifact --- and picks up \texttt{*IT.java} classes. The practical effect: \texttt{mvn test} now runs quickly, without Docker, suitable for the day-to-day edit-compile-test loop; \texttt{mvn verify} runs the complete suite, unit and integration together, suitable for pre-commit validation and for CI/CD (Phase 4's next step).
+
+Introducing Failsafe also surfaced two leftover smoke tests (\texttt{CatalogServiceApplicationTests}, \texttt{ApiGatewayApplicationTests}, and later \texttt{BookingServiceApplicationTests}) that had never been migrated from the V1-era \texttt{@ActiveProfiles("test")} pattern --- which only excludes Kafka autoconfiguration, not the datasource --- to real Testcontainers infrastructure. These had continued to silently depend on a manually running \texttt{docker-compose} stack, masked in earlier sessions simply because that stack happened to be running at the time. All three were migrated to extend their service's \texttt{AbstractIntegrationTest}, closing the dependency entirely.
+
+\subsection{End-to-End Testing}
+
+A new, standalone Maven module, \texttt{e2e-tests}, was created separately from any individual service. Unlike every other test in the project, it is deliberately \emph{not} a Spring Boot test and uses no Testcontainers: it is a plain JUnit 5 + RestAssured HTTP client, hitting the real, already-running API Gateway on \texttt{localhost:8080}, exactly as a genuine external client would.
+
+\begin{lstlisting}[style=javastyle, language=Java, caption={e2e module structure --- no Spring context, no mocks}]
+public abstract class BaseE2ETest {
+    protected static final String GATEWAY_URL = "http://localhost:8080";
+
+    @BeforeAll
+    static void configureRestAssured() {
+        RestAssured.baseURI = GATEWAY_URL;
+    }
+}
+\end{lstlisting}
+
+This module assumes the full platform (\texttt{start-platform.sh}) is already running rather than orchestrating it itself. Fully containerising the e2e suite --- Testcontainers starting each service as its own Docker image --- was considered and deliberately deferred to Phase 5 (Kubernetes), since it would require Dockerfiles for every service that Phase 5 needs to build anyway; building them now would duplicate that work.
+
+Four scenarios were implemented, each exercising the full stack with nothing mocked --- real Auth, Catalog, Booking, and Gateway, real Kafka, three real databases:
+
+\begin{itemize}
+    \item \textbf{Full provider-to-client booking flow} --- register PROVIDER, create an offer and resource, register CLIENT, create a booking, retrieve it. This is the first test in the project to prove, end-to-end, that a Kafka event genuinely published by Catalog is genuinely consumed and used by Booking in its response --- not asserted separately on each side.
+    \item \textbf{Overlapping time-slot conflict} --- a second booking for the same resource and time is correctly rejected with 409.
+    \item \textbf{RBAC rejection end-to-end} --- a PROVIDER token attempting the CLIENT-only booking-creation action is rejected with 403, validating the gateway RBAC fix (Section~9.4.2) through the real stack, not just at the gateway in isolation.
+    \item \textbf{Resource deactivation propagation} --- a PROVIDER deactivates a resource; a subsequent CLIENT booking attempt is rejected (503). This implicitly validates that the \texttt{RESOURCE\_DEACTIVATED} Kafka event propagates from Catalog to Booking's cache fast enough in practice to matter --- a timing property no isolated test could measure.
+\end{itemize}
+
+All four scenarios pass reliably, both individually and run together, completing in roughly 11 seconds total despite spanning four services and multiple real infrastructure components.
+
+\subsection{Contract Testing with Pact}
+\label{sec:pact}
+
+Consumer-driven contract testing was planned to formally verify the informal agreement between \texttt{ResourceEventDTO} (Catalog, the producer) and \texttt{ResourceCacheEventDTO} (Booking, the consumer) --- two independently defined classes, deliberately decoupled at the Java level (Section~8.4), whose only real guarantee of compatibility today is that nobody has changed one without checking the other. A first attempt, documented in an earlier version of this section, stalled on inconsistent Pact-JVM API signatures and was deliberately reverted rather than pushed through by guesswork. A follow-up session picked the problem back up, diagnosed the actual cause of that inconsistency, and completed both the HTTP contract (Booking calling Catalog's \texttt{/api/resources} endpoints via \texttt{CatalogClient}) and the message contract (the Kafka event above) using \texttt{au.com.dius.pact.consumer:junit5} / \texttt{au.com.dius.pact.provider:junit5} 4.6.9 --- the same version already pinned in both \texttt{pom.xml} files; no dependency change was needed once the correct usage was identified.
+
+\subsubsection{Diagnosing the Original Blocker}
+
+With hindsight, the six contradictory signature errors from the first attempt have a concrete explanation rather than being simply ``the library is confusing.'' Pact-JVM's message-pact support exists in \emph{two} parallel, non-interchangeable API generations that both ship in the same artifact: an older, V3-specification-oriented API (\texttt{MessagePactBuilder} from \texttt{au.com.dius.pact.consumer}, returning \texttt{au.com.dius.pact.core.model.messaging.MessagePact}), and a newer, unified V4-specification API (\texttt{PactBuilder} from \texttt{au.com.dius.pact.consumer.dsl}, returning \texttt{V4Pact}/\texttt{V4Interaction} types) that folds HTTP and message interactions into one pact-file format. Documentation, blog posts, and search results accumulated across several major Pact-JVM releases freely mix examples from both generations without always naming which one they target, so it is easy to end up writing a \texttt{@Pact} method whose builder parameter belongs to one generation and whose return type or \texttt{expectsToReceive(...)} call belongs to the other --- which reproduces exactly the ``different, sometimes contradictory'' errors recorded previously. This is not a hypothetical explanation: Pact-JVM's own issue tracker documents the same confusion at the framework level (pact-foundation/pact-jvm \#1479, \emph{``JUnit5 - async pact uses V4 specification by default but MessagePactBuilder uses V3''}), confirming that the two generations' default spec versions have genuinely diverged at points, independent of anything project-specific. Separately, the ``docs reference 4.4.X, 4.4.10 does not exist on Maven Central'' problem was also real and reproducible: \texttt{docs.pact.io} is versioned as a general site, not per-release, so a version string copied verbatim from a page can point at a release that was never actually published --- checking Maven Central's own metadata directly (rather than trusting the docs' printed version number) is what avoided repeating that mistake this time.
+
+\subsubsection{Resolution: Reference Implementation Instead of Documentation Fragments}
+
+The fix followed exactly the approach the first attempt's postmortem proposed for a future session: rather than reconstructing usage from documentation fragments, go to a known-working reference implementation and adapt it directly. Concretely, that meant fetching the actual Java source files from Pact-JVM's own test suite on GitHub, at the \texttt{v4.6.x} branch --- matching the \texttt{4.6.9} artifact already pinned in this project, rather than an arbitrary or ambiguous version. These files are not documentation \emph{about} the library; they are tests \emph{of} the library, shipped to validate that exact version, so they are guaranteed internally consistent with the installed artifact in a way a blog post from an unspecified year cannot be:
+
+\begin{itemize}
+    \item \texttt{consumer/junit5/.../AsyncMessageTest.java} --- the consumer-side \texttt{MessagePactBuilder} pattern for asynchronous (Kafka-style) messages.
+    \item \texttt{provider/junit5/.../MessageWithMetadataTest.java} --- the provider-side verification pattern (\texttt{MessageTestTarget}, \texttt{@PactVerifyProvider}, \texttt{MessageAndMetadata}).
+    \item \texttt{consumer/junit5/.../ArticlesTest.java} and \texttt{provider/junit5/.../ContractTest.java} --- the equivalent request/response pair for the HTTP contract.
+    \item \texttt{provider/junit5/.../ProviderStateInjectedTest.java} --- the \texttt{@State} provider-state pattern used to seed a specific database row before the provider replays a recorded request against it.
+\end{itemize}
+
+Every type in the resulting consumer test belongs consistently to the same (V3-message) API generation, with no V4 types mixed in, and the pact specification version is pinned explicitly rather than left to an implicit default:
+
+\begin{lstlisting}[style=javastyle, language=Java, caption={The working consumer-side message pact --- one API generation throughout}]
+@ExtendWith(PactConsumerTestExt.class)
+@PactTestFor(providerName = "catalog-service-kafka-resource-events",
+             providerType = ProviderType.ASYNCH, pactVersion = PactSpecVersion.V3)
+class CatalogResourceEventsMessagePactTest {
+
+    @Pact(consumer = "booking-service")
+    MessagePact resourceCreatedEvent(MessagePactBuilder builder) {
+        DslPart body = new PactDslJsonBody()
+                .stringMatcher("eventType",
+                        "RESOURCE_CREATED|RESOURCE_UPDATED|RESOURCE_ACTIVATED|RESOURCE_DEACTIVATED",
+                        "RESOURCE_CREATED")
+                .uuid("resourceId")
+                .stringType("name", "Haircut Deluxe")
+                .decimalType("price", 35.00)
+                .integerType("durationInMinutes", 45)
+                .booleanType("active", true);
+
+        return builder.given("a resource was created in Catalog")
+                .expectsToReceive("a resource created event")
+                .withMetadata(Map.of("contentType", "application/json"))
+                .withContent(body)
+                .toPact();
+    }
+
+    @Test
+    @PactTestFor(pactMethod = "resourceCreatedEvent")
+    void testResourceCreatedEvent(List<Message> messages) { /* ... */ }
+}
+\end{lstlisting}
+
+Two smaller decisions were made deliberately while wiring the provider side, each with a stated trade-off rather than a default:
+
+\begin{description}
+    \item[Verifying the real Kafka wire format, not a hand-built JSON string.] A typical message-pact provider test simply constructs the expected DTO, serialises it, and hands the bytes to \texttt{MessageAndMetadata} --- which proves the DTO's \emph{fields} line up but nothing about how Spring Kafka actually puts it on the wire. This project's producer test instead calls the real \texttt{ResourceEventProducer.publish(...)}, then reads the message back off a real Testcontainers Kafka broker (reusing the \texttt{consumeMessages(topic, timeout)} helper already used by \texttt{ResourceCreationEventIT}), and verifies \emph{that} payload against the pact. This is strictly stronger: it also exercises \texttt{spring.json.add.type.headers: false} and the concrete field ordering/formatting Jackson produces through Spring Kafka's \texttt{JsonSerializer}, matching what the existing \texttt{pom.xml} comment already promised (\emph{``verifies that ResourceEventProducer actually generates messages matching what consumers expect''}) rather than only a weaker, DTO-shape-only guarantee.
+    \item[Committing the pact file instead of standing up a Pact Broker.] With two independently built Maven modules and no aggregator POM, a provider test that expects the consumer's freshly generated pact file on disk (the default \texttt{target/pacts} location) only works if \texttt{booking-service} was built first in the same session --- an ordering the project's tooling does not currently enforce, and a broker is the properly decoupled solution but is genuinely new infrastructure this project does not yet run. The pact files generated by both consumer tests are instead committed under \texttt{catalog-service/src/test/resources/pacts/}, a well-established intermediate practice for teams before adopting a broker. The trade-off is explicit and accepted: the committed file must be regenerated (by rerunning the two consumer tests and recopying their output) whenever the contract changes, which a broker would otherwise automate --- noted directly in the provider tests' code comments so the gap cannot be missed silently.
+\end{description}
+
+Both contracts are verified end-to-end: four Pact tests pass (two consumer, two provider), the HTTP provider test runs the real \texttt{ServiceResourceController} against Testcontainers PostgreSQL via \texttt{HttpTestTarget}, and the message provider test round-trips through Testcontainers Kafka as described above. Re-running each service's full suite afterwards confirmed no regressions (Booking 30/30, Catalog 35/35).
+
+\subsection{Lessons Learned}
+
+The dominant theme of this phase was that \textbf{shared state across test classes running in the same JVM is the most common source of subtle integration-test bugs} --- not business logic errors, but framework and library lifecycle assumptions that silently break when multiple test classes interact. This pattern recurred four times in different disguises: Testcontainers' \texttt{@Container} lifecycle across inherited static fields, Resilience4j's \texttt{CircuitBreakerRegistry} shared via Spring's context caching, WireMock's global static client configuration, and even a JWT tampering test whose reliability depended on essentially random Base64 padding boundaries varying by run. None of these were caught by unit tests, and none were caught by running a single integration test class in isolation --- all four only became visible when the full suite ran together, which is precisely the condition under which a CI pipeline runs tests.
+
+The self-invocation bug --- found independently in two unrelated services --- is a stronger lesson still, precisely because it is not really about Kafka, Resilience4j, or Spring Retry individually: it is a property of how Spring's proxy-based AOP works in general, applying equally to \texttt{@Transactional}, \texttt{@Async}, and \texttt{@Cacheable}. Discovering it twice, independently, is what elevated it from ``a mistake I made once'' to ``a pattern this codebase needs an automated guard against,'' motivating the ArchUnit recommendation for V3/V4.
+
+The API Gateway RBAC bug is the clearest illustration in this project of why manual testing gives a false sense of security when it silently tests the wrong path. The bug was real, severe, and had existed since the security configuration was first written --- yet passed unnoticed through manual verification for one simple, human reason: the manual tests were, without anyone realising it, bypassing the exact component that was broken.
+
+Finally, the Pact episode is its own lesson, distinct from every code-level finding above, precisely because of its two-part shape: the first session recognised unproductive trial-and-error against inconsistent documentation and stopped rather than continuing to burn time on it --- itself a judgement call worth recording, not a failure. The second session's resolution (Section~\ref{sec:pact}) is the other half of that same lesson: the fix was not ``try harder against the same documentation,'' but a deliberate change of source --- verifying claims against the library's own version-matched test suite instead of documentation of uncertain vintage. Stopping and returning with a better approach was only valuable because the second attempt changed \emph{what kind of source} it trusted, not just how long it persisted.

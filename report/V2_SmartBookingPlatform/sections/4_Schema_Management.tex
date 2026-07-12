@@ -1,0 +1,176 @@
+\section{Schema Management with Flyway}
+
+In V1, all services used Hibernate's \texttt{ddl-auto: create-drop}, which destroyed and recreated the entire database schema on every application restart. The Log Service used \texttt{ddl-auto: update}, which allowed Hibernate to modify the schema automatically without any record of what changed or when. Both approaches were acceptable during early development but incompatible with any production deployment.
+
+V2 replaces both with Flyway --- a database migration tool that manages schema evolution through versioned, immutable SQL scripts.
+
+\subsection{The Problem with create-drop and update}
+
+\texttt{create-drop} has two critical flaws in a production context. First, every restart destroys all data --- a catastrophic property for any system with real users. Second, the schema is derived entirely from the current state of the Java entity classes, with no record of how it evolved. If an entity changes, there is no way to know what the previous schema looked like or how to migrate existing data.
+
+\texttt{update} is less destructive --- it never drops data --- but introduces a different problem: schema drift. Hibernate applies changes silently and automatically, with no version history and no way to reproduce the exact sequence of changes that produced the current schema. In a multi-environment system, this leads to divergence between development, staging, and production databases.
+
+Both approaches shift schema ownership to the application runtime. Flyway transfers it to the developer, where it belongs.
+
+\subsection{How Flyway Works}
+
+Flyway manages schema evolution through SQL migration scripts stored in \texttt{src/main/resources/db/migration}. Each script follows the naming convention \texttt{V\{version\}\_\_\{description\}.sql}, where the version number determines execution order.
+
+On startup, Flyway checks a \texttt{flyway\_schema\_history} table in the database. Scripts that have already been applied are skipped. Scripts that have not been applied are executed in version order. Once a script is applied, it is never modified or re-executed --- the history is immutable.
+
+This guarantees that the schema in any environment is the result of the exact same sequence of migrations, applied in the same order.
+
+\subsection{Implementation}
+
+Flyway was added to four services: Auth, Catalog, Booking, and Log. The Discovery Service and API Gateway have no database and require no migration management.
+
+Two dependencies were added to each service's \texttt{pom.xml}:
+
+\begin{lstlisting}[style=javastyle, language=XML, caption={Flyway dependencies}]
+<dependency>
+    <groupId>org.flywaydb</groupId>
+    <artifactId>flyway-core</artifactId>
+</dependency>
+<dependency>
+    <groupId>org.flywaydb</groupId>
+    <artifactId>flyway-database-postgresql</artifactId>
+</dependency>
+\end{lstlisting}
+
+The \texttt{application.yaml} of each service was updated to replace \texttt{create-drop} or \texttt{update} with \texttt{validate}:
+
+\begin{lstlisting}[style=yamlstyle, caption={Hibernate configuration after Flyway migration}]
+spring:
+  jpa:
+    hibernate:
+      ddl-auto: validate  # schema is created by Flyway — Hibernate verifies entities match, never modifies
+    defer-datasource-initialization: true  # ensures Flyway runs migrations before Hibernate validates
+\end{lstlisting}
+
+The \texttt{defer-datasource-initialization} property is required to ensure Flyway executes its migrations before Hibernate attempts to validate the schema. Without it, Hibernate validates against an empty database and fails to start.
+
+\subsection{Migration Scripts}
+
+Each service received an initial migration script that reproduces the schema previously managed by Hibernate.
+
+\subsubsection{Auth Service --- V1}
+
+\begin{lstlisting}[style=sqlstyle, caption={V1\_\_create\_users\_table.sql}]
+CREATE TABLE IF NOT EXISTS users (
+    id                      UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    name                    VARCHAR(255) NOT NULL,
+    email                   VARCHAR(255) NOT NULL UNIQUE,
+    password                VARCHAR(255) NOT NULL,
+    role                    VARCHAR(50)  NOT NULL,
+    account_non_expired     BOOLEAN NOT NULL DEFAULT TRUE,
+    account_non_locked      BOOLEAN NOT NULL DEFAULT TRUE,
+    credentials_non_expired BOOLEAN NOT NULL DEFAULT TRUE,
+    enabled                 BOOLEAN NOT NULL DEFAULT TRUE
+);
+\end{lstlisting}
+
+\subsubsection{Catalog Service --- V1}
+
+\begin{lstlisting}[style=sqlstyle, caption={V1\_\_create\_catalog\_tables.sql}]
+CREATE TABLE IF NOT EXISTS service_offers (
+    id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    title         VARCHAR(255) NOT NULL,
+    description   VARCHAR(1000),
+    category      VARCHAR(100) NOT NULL,
+    provider_name VARCHAR(255) NOT NULL,
+    location      VARCHAR(255),
+    created_at    TIMESTAMP    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS service_resources (
+    id                  UUID           PRIMARY KEY DEFAULT gen_random_uuid(),
+    offer_id            UUID           NOT NULL REFERENCES service_offers(id),
+    name                VARCHAR(255)   NOT NULL,
+    price               NUMERIC(19, 2) NOT NULL,
+    duration_in_minutes INTEGER,
+    active              BOOLEAN        NOT NULL DEFAULT TRUE
+);
+
+CREATE TABLE IF NOT EXISTS unavailable_periods (
+    resource_id UUID      NOT NULL REFERENCES service_resources(id),
+    start_time  TIMESTAMP NOT NULL,
+    end_time    TIMESTAMP NOT NULL
+);
+\end{lstlisting}
+
+\subsubsection{Booking Service --- V1 and V2}
+
+The Booking Service received two migrations. The initial script creates the bookings table. A second migration, added during V2 Phase 1, adds the \texttt{version} and \texttt{idempotency\_key} columns introduced for concurrency protection:
+
+\begin{lstlisting}[style=sqlstyle, caption={V1\_\_create\_bookings\_table.sql}]
+CREATE TABLE IF NOT EXISTS bookings (
+    id             UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    resource_id    UUID         NOT NULL,
+    customer_name  VARCHAR(255) NOT NULL,
+    customer_email VARCHAR(255) NOT NULL,
+    start_time     TIMESTAMP    NOT NULL,
+    end_time       TIMESTAMP    NOT NULL,
+    status         VARCHAR(50)  NOT NULL,
+    created_at     TIMESTAMP    NOT NULL
+);
+\end{lstlisting}
+
+\begin{lstlisting}[style=sqlstyle, caption={V2\_\_add\_version\_to\_bookings.sql}]
+ALTER TABLE bookings ADD COLUMN version BIGINT NOT NULL DEFAULT 0;
+\end{lstlisting}
+
+\begin{lstlisting}[style=sqlstyle, caption={V3\_\_add\_idempotency\_key\_to\_bookings.sql}]
+ALTER TABLE bookings ADD COLUMN idempotency_key VARCHAR(255) UNIQUE;
+\end{lstlisting}
+
+The existence of V2 and V3 migrations in the Booking Service illustrates Flyway's core value: schema changes are additive, versioned, and applied incrementally. The V1 script is never modified. New requirements produce new scripts.
+
+\subsubsection{Log Service --- V1}
+
+\begin{lstlisting}[style=sqlstyle, caption={V1\_\_create\_log\_event\_table.sql}]
+CREATE TABLE IF NOT EXISTS log_event (
+    id             UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+    correlation_id VARCHAR(255)  NOT NULL,
+    service_name   VARCHAR(255),
+    event_type     VARCHAR(255),
+    level          VARCHAR(50),
+    source         VARCHAR(255),
+    message        VARCHAR(2000),
+    created_at     TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_log_correlation_id ON log_event(correlation_id);
+\end{lstlisting}
+
+\subsection{The validate Mode}
+
+With Flyway owning schema creation, Hibernate's role is reduced to verification. The \texttt{validate} mode compares the entity model against the existing database schema on startup and throws an exception if they do not match. This acts as a safety net: if a developer modifies an entity without creating a corresponding migration, the application will refuse to start.
+
+This is the correct division of responsibility. Flyway controls what exists in the database. Hibernate verifies that the Java model is consistent with it.
+
+\subsection{Trade-offs}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lp{9cm}}
+\toprule
+\textbf{Aspect} & \textbf{Impact} \\
+\midrule
+Schema stability & Schema survives restarts and deployments --- data is preserved \\
+Version history & Every schema change is recorded, ordered, and reproducible \\
+Development friction & New columns require a new SQL script, not just an entity change \\
+Migration immutability & Applied scripts cannot be modified --- errors require a new corrective migration \\
+Environment consistency & All environments run the exact same migration sequence \\
+\bottomrule
+\end{tabular}
+\caption{Flyway trade-offs}
+\end{table}
+
+\subsection{Lessons Learned}
+
+The \texttt{defer-datasource-initialization} property is not optional when using Flyway with Spring Boot's JPA auto-configuration. Without it, Hibernate attempts to validate the schema before Flyway has run the migrations, causing the application to fail on first startup against an empty database.
+
+The \texttt{dependencyManagement} section of Maven is not a substitute for \texttt{dependencies}. During implementation, the Flyway dependencies were accidentally placed in \texttt{dependencyManagement}, which declares version constraints but does not add the library to the classpath. The application compiled but Flyway was never loaded, producing a silent failure where Hibernate attempted to validate an empty schema. The distinction is important: \texttt{dependencyManagement} governs versions in a multi-module project; \texttt{dependencies} adds libraries to the classpath.
+
+Migration scripts should be derived from the actual entity model, not written from memory. The V1 entities were inspected before writing each script to ensure column names, types, and constraints matched what Hibernate would have generated.
+\end{lstlisting}

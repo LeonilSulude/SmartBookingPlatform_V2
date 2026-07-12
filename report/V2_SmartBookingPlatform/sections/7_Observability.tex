@@ -1,0 +1,205 @@
+\section{Observability and Logging}
+
+Observability in a distributed system means being able to answer the question: what is the system doing right now, and why did it behave that way? In V1, observability was addressed through centralised logging with correlation ID propagation over RabbitMQ. V2 extends this foundation in two directions: correcting the filter implementation that prevented correlation IDs from propagating correctly in internal services, and introducing structured metrics and distributed tracing with Prometheus, Grafana, and Zipkin.
+
+\subsection{V1 Foundation}
+
+V1 established a centralised logging architecture where each microservice published structured log events to a RabbitMQ exchange. A dedicated log-service consumed these events asynchronously and persisted them to its own PostgreSQL database. Each event carried a correlation ID --- a UUID generated at the API Gateway and propagated through all services --- allowing all log events from a single user request to be grouped together.
+
+This design decoupled logging from business logic. A logging failure never affected the service that produced the event. The correlation ID provided a basic form of distributed tracing without requiring additional tooling.
+
+\subsection{Limitations Carried Forward from V1}
+
+V1 identified two propagation problems that were documented but not resolved:
+
+The first was the use of \texttt{WebFilter} in internal services. \texttt{WebFilter} is the filter interface for Spring WebFlux. The internal services --- Auth, Catalog, and Booking --- are built with Spring MVC, the servlet-based framework. In a servlet-based application, \texttt{WebFilter} is not part of the request processing pipeline and is silently ignored by the servlet container. The result was that correlation IDs were never stored in MDC within internal services, making it impossible to correlate log statements from those services with the originating request.
+
+The second was the use of MDC in the API Gateway. MDC stores values in a \texttt{ThreadLocal} --- a map local to the current thread. The API Gateway uses Spring Cloud Gateway, which is built on Spring WebFlux and processes requests as reactive pipelines. A single request may be processed across multiple threads as the pipeline progresses. When the thread changes, the MDC value set on the previous thread is lost. This meant that correlation IDs generated at the gateway were not reliably available throughout the reactive pipeline.
+
+\subsection{Filter Corrections}
+
+\subsubsection{Internal Services — OncePerRequestFilter}
+
+In Spring MVC, each request is assigned a dedicated thread from the moment it enters the filter chain until the response is written. The thread never changes mid-request. MDC is therefore safe in this context --- values set at the start of the filter are available throughout the entire request lifecycle, in every component called on that thread.
+
+The correct filter interface for servlet-based applications is \texttt{OncePerRequestFilter}, which guarantees execution exactly once per request on the correct thread. All three internal services were updated to extend \texttt{OncePerRequestFilter} instead of implementing \texttt{WebFilter}:
+
+\begin{lstlisting}[style=javastyle, language=Java, caption={Corrected filter in internal services}]
+@Component
+public class CorrelationIdPropagationFilter extends OncePerRequestFilter {
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest request,
+                                    HttpServletResponse response,
+                                    FilterChain filterChain)
+            throws ServletException, IOException {
+
+        String correlationId = request.getHeader(CORRELATION_HEADER);
+
+        if (correlationId == null || correlationId.isBlank()) {
+            correlationId = UUID.randomUUID().toString();
+        }
+
+        // store in MDC — safe in Spring MVC, thread never changes mid-request
+        MDC.put(MDC_KEY, correlationId);
+        response.addHeader(CORRELATION_HEADER, correlationId);
+
+        try {
+            filterChain.doFilter(request, response);
+        } finally {
+            // always clear MDC after request — prevents thread pool contamination
+            MDC.remove(MDC_KEY);
+        }
+    }
+}
+\end{lstlisting}
+
+\subsubsection{API Gateway — Reactor Context}
+
+The API Gateway uses Spring WebFlux, where the execution model is fundamentally different. Requests are processed as reactive pipelines --- sequences of asynchronous operators that may execute on different threads. MDC, being thread-local, is unsafe in this context.
+
+The correct propagation mechanism for WebFlux is the Reactor \texttt{Context} --- an immutable map that travels with the reactive pipeline regardless of thread switches. When the scheduler moves from thread A to thread B, the \texttt{Context} travels with the pipeline. The correlation ID remains accessible throughout the entire request lifecycle.
+
+The \texttt{CorrelationIdFilter} was updated to use \texttt{contextWrite} instead of \texttt{MDC.put}:
+
+\begin{lstlisting}[style=javastyle, language=Java, caption={Reactor Context propagation in the API Gateway}]
+@Override
+public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
+
+    String correlationId = exchange.getRequest()
+            .getHeaders()
+            .getFirst(CORRELATION_HEADER);
+
+    if (correlationId == null || correlationId.isBlank()) {
+        correlationId = UUID.randomUUID().toString();
+    }
+
+    final String finalCorrelationId = correlationId;
+
+    // mutate request to forward correlation ID to downstream services
+    ServerWebExchange mutatedExchange = exchange.mutate()
+            .request(r -> r.header(CORRELATION_HEADER, finalCorrelationId))
+            .build();
+
+    mutatedExchange.getResponse()
+            .getHeaders()
+            .add(CORRELATION_HEADER, finalCorrelationId);
+
+    // propagate via Reactor Context — safe across thread switches unlike MDC
+    return chain.filter(mutatedExchange)
+            .contextWrite(ctx -> ctx.put(CORRELATION_KEY, finalCorrelationId));
+}
+\end{lstlisting}
+
+\subsubsection{Why MDC Remains in Internal Services}
+
+The Reactor Context replaces MDC at the gateway level. However, MDC remains the correct mechanism in internal services for two reasons.
+
+First, internal services use Spring MVC --- a single-threaded-per-request model where MDC is safe and sufficient. Replacing MDC with Reactor Context in a servlet-based service would add complexity without benefit.
+
+Second, the log-service consumes events via RabbitMQ, not via HTTP. Micrometer Tracing propagates trace context automatically via HTTP headers, but has no visibility over the RabbitMQ message pipeline. The \texttt{LogEventProducer} in each service reads the correlation ID from MDC and attaches it to every log event published to RabbitMQ. Without MDC, this propagation would not be possible.
+
+This means the two mechanisms coexist by design:
+
+\begin{itemize}
+    \item \textbf{MDC in internal services} --- correlation ID propagation to the log-service via RabbitMQ
+    \item \textbf{Reactor Context in the gateway} --- safe propagation through the reactive pipeline
+    \item \textbf{Micrometer Tracing} --- automatic distributed tracing via HTTP headers (introduced in Phase 3)
+\end{itemize}
+
+If logging were performed synchronously via HTTP instead of RabbitMQ, Micrometer Tracing would propagate the trace context automatically and MDC would become unnecessary. However, synchronous logging via HTTP would introduce availability coupling --- if the log-service is unavailable, business operations would be blocked or lose log events. Asynchronous messaging via RabbitMQ decouples logging availability from business availability, at the cost of requiring manual correlation ID propagation.
+
+\subsection{Distributed Tracing — Micrometer + Zipkin}
+
+V2 introduces distributed tracing using Micrometer Tracing with the Brave bridge and Zipkin as the tracing backend.
+
+Micrometer Tracing instruments the application automatically. Every inbound HTTP request, every outbound Feign call, and every Kafka message produces a span --- a unit of work with a start time, end time, and set of tags. Spans from the same request share a \texttt{traceId}, forming a trace that visualises the full request flow across all services.
+
+Unlike the manual correlation ID approach, Micrometer Tracing requires no application code changes. The instrumentation is provided by auto-configuration: adding the dependencies to each service's \texttt{pom.xml} is sufficient.
+
+\begin{lstlisting}[style=javastyle, language=XML, caption={Micrometer Tracing dependencies}]
+<!-- Micrometer Tracing with Brave bridge -->
+<dependency>
+    <groupId>io.micrometer</groupId>
+    <artifactId>micrometer-tracing-bridge-brave</artifactId>
+</dependency>
+<!-- Zipkin reporter — sends spans to Zipkin server -->
+<dependency>
+    <groupId>io.zipkin.reporter2</groupId>
+    <artifactId>zipkin-reporter-brave</artifactId>
+</dependency>
+\end{lstlisting}
+
+Each service is configured to report spans to the Zipkin server:
+
+\begin{lstlisting}[style=yamlstyle, caption={Zipkin configuration in application.yaml}]
+management:
+  tracing:
+    sampling:
+      probability: 1.0  # sample every request — acceptable in development
+  zipkin:
+    tracing:
+      endpoint: http://localhost:9411/api/v2/spans  # Zipkin collector endpoint
+\end{lstlisting}
+
+\subsection{Metrics — Prometheus and Grafana}
+
+Prometheus scrapes metrics from each service via the \texttt{/actuator/prometheus} endpoint, exposed by the \texttt{micrometer-registry-prometheus} dependency:
+
+\begin{lstlisting}[style=javastyle, language=XML, caption={Prometheus metrics dependency}]
+<dependency>
+    <groupId>io.micrometer</groupId>
+    <artifactId>micrometer-registry-prometheus</artifactId>
+</dependency>
+\end{lstlisting}
+
+The scrape configuration in \texttt{prometheus.yml} defines which services Prometheus monitors and how frequently:
+
+\begin{lstlisting}[style=yamlstyle, caption={prometheus.yml scrape configuration}]
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'auth-service'
+    metrics_path: '/actuator/prometheus'
+    static_configs:
+      - targets: ['host.docker.internal:8081']
+  - job_name: 'catalog-service'
+    metrics_path: '/actuator/prometheus'
+    static_configs:
+      - targets: ['host.docker.internal:8082']
+  - job_name: 'booking-service'
+    metrics_path: '/actuator/prometheus'
+    static_configs:
+      - targets: ['host.docker.internal:8083']
+\end{lstlisting}
+
+Grafana connects to Prometheus as a data source and provides dashboards for live system visibility. The Spring Boot community maintains pre-built dashboards --- importable by ID directly from the Grafana UI --- that cover JVM metrics, HTTP request rates, error rates, and latency percentiles without requiring custom configuration.
+
+\subsection{Current Observability Stack}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{Capability} & \textbf{Tool} & \textbf{Status} \\
+\midrule
+Centralised logging & RabbitMQ + log-service & Implemented in V1, filter corrected in V2 \\
+Correlation ID propagation & X-Correlation-Id header + MDC & Corrected in V2 \\
+Health checks & Spring Actuator & Implemented in V1 \\
+Service registry & Eureka dashboard & Implemented in V1 \\
+Metrics collection & Prometheus + Actuator & Implemented in V2 \\
+Metrics visualisation & Grafana & Implemented in V2 \\
+Distributed tracing & Micrometer Tracing + Zipkin & Implemented in V2 \\
+\bottomrule
+\end{tabular}
+\caption{V2 observability stack}
+\end{table}
+
+\subsection{Lessons Learned}
+
+The \texttt{WebFilter} mistake in internal services failed silently. There was no compilation error, no startup error, and no runtime exception --- the filter simply had no effect. The correlation IDs appeared to work in manual testing because the gateway forwarded the header and the log-service received events, but the MDC values within the internal services were never set. Verifying that a filter is actually executing --- through a log statement or a dedicated test --- is essential.
+
+The distinction between MDC and Reactor Context reflects a broader principle: the propagation mechanism must match the execution model. Servlet-based applications use thread-local storage safely; reactive pipelines require context-based propagation. Mixing the two models produces behaviour that is correct in isolation but incorrect under load, when the reactive scheduler switches threads.
+
+Logging via asynchronous messaging introduces a trade-off that is easy to overlook: it decouples logging availability from business availability, but requires manual correlation ID propagation that would be unnecessary with synchronous HTTP logging. The choice of RabbitMQ for logging was appropriate for the availability requirements of this system, and the manual propagation is the necessary cost of that choice.

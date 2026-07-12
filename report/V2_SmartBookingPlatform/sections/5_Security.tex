@@ -1,0 +1,183 @@
+\section{Security Architecture}
+
+The security architecture of V1 established the correct foundation: stateless JWT-based authentication centralised at the API Gateway, with no server-side sessions and no duplication of authentication logic across internal services. V2 preserves this foundation and extends it in two directions: role-based authorization enforcement and correction of the filter implementation in internal services.
+
+\subsection{V1 Foundation}
+
+V1 centralised security at the API Gateway. All external traffic enters through a single point, where the JWT token is validated before any request reaches an internal service. Internal services trust that any request they receive has already been authenticated. This eliminates duplication and ensures consistent enforcement.
+
+The JWT token structure from V1 is preserved in V2:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{ll}
+\toprule
+\textbf{Claim} & \textbf{Purpose} \\
+\midrule
+Subject & User identifier (email) \\
+Role & Drives authorization decisions \\
+Expiration & Limits token lifetime to 1 hour \\
+\bottomrule
+\end{tabular}
+\caption{JWT token claims}
+\end{table}
+
+\subsection{Limitations Carried Forward from V1}
+
+V1 embedded the role claim in the token but never read it. The \texttt{JwtAuthenticationFilter} created a Spring Security \texttt{User} object with an empty list of authorities:
+
+\begin{lstlisting}[style=javastyle, language=Java, caption={V1 — role claim ignored}]
+User user = new User(username, "", Collections.emptyList());
+\end{lstlisting}
+
+The consequence was that all authenticated requests were treated equally. A \texttt{CLIENT} could call \texttt{POST /api/offers} and the gateway would forward the request without objection. The role system existed in the data model but had no effect on system behaviour.
+
+V1 also used \texttt{WebFilter} in the internal services for correlation ID propagation. This was incorrect: \texttt{WebFilter} is the WebFlux interface and has no effect in servlet-based Spring MVC applications. The filter was silently ignored, meaning correlation IDs were never propagated in Auth, Catalog, or Booking services.
+
+\subsection{Role-Based Authorization}
+
+\subsubsection{Extracting the Role}
+
+The first change was to read the role claim from the token. A new method was added to \texttt{JwtService}:
+
+\begin{lstlisting}[style=javastyle, language=Java, caption={Role extraction from JWT claims}]
+/**
+ * Extracts the role claim from the token.
+ * Role is stored as a custom claim — not part of the standard JWT subject.
+ *
+ * @param token the JWT
+ * @return the role string (e.g. CLIENT, PROVIDER, ADMIN) or null if not present
+ */
+public String extractRole(String token) {
+    return extractClaim(token, claims -> claims.get("role", String.class));
+}
+\end{lstlisting}
+
+\subsubsection{Setting the Authority}
+
+The \texttt{JwtAuthenticationFilter} was updated to extract the role and set it as a \texttt{GrantedAuthority} in the security context:
+
+\begin{lstlisting}[style=javastyle, language=Java, caption={V2 — role set as GrantedAuthority}]
+String role = jwtService.extractRole(token);
+List<SimpleGrantedAuthority> authorities = role != null
+        ? List.of(new SimpleGrantedAuthority(role))
+        : List.of();
+
+User user = new User(username, "", authorities);
+UsernamePasswordAuthenticationToken authentication =
+        new UsernamePasswordAuthenticationToken(user, null, authorities);
+\end{lstlisting}
+
+\subsubsection{Enforcing Routes}
+
+The \texttt{SecurityWebFilterChain} was updated to enforce access control per route and HTTP method:
+
+\begin{lstlisting}[style=javastyle, language=Java, caption={Route-level RBAC in SecurityConfig}]
+.authorizeExchange(exchanges -> exchanges
+    .pathMatchers("/api/auth/**").permitAll()
+    .pathMatchers("/actuator/**").permitAll()
+
+    // ADMIN has full access to all routes
+    .pathMatchers("/**").hasAuthority("ADMIN")
+
+    // only PROVIDER can manage offers and resources
+    .pathMatchers(HttpMethod.POST,
+        "/api/offers/**", "/api/resources/**").hasAuthority("PROVIDER")
+    .pathMatchers(HttpMethod.DELETE,
+        "/api/offers/**", "/api/resources/**").hasAuthority("PROVIDER")
+
+    // only CLIENT can create bookings
+    .pathMatchers(HttpMethod.POST,
+        "/api/bookings/**").hasAuthority("CLIENT")
+
+    // authenticated users can read catalog and booking data
+    .pathMatchers(HttpMethod.GET,
+        "/api/offers/**", "/api/resources/**",
+        "/api/bookings/**").authenticated()
+
+    .anyExchange().authenticated()
+)
+\end{lstlisting}
+
+This is coarse-grained authorization --- enforced at the gateway level by route and HTTP method. Fine-grained rules, such as a \texttt{PROVIDER} only being able to delete their own offers, belong inside the individual services and are planned for a future iteration.
+
+\subsection{Filter Correction in Internal Services}
+
+\subsubsection{The Problem}
+
+Internal services --- Auth, Catalog, and Booking --- are built with Spring MVC, the traditional servlet-based web framework. V1 used \texttt{WebFilter} for correlation ID propagation in these services. \texttt{WebFilter} is the filter interface for Spring WebFlux, the reactive framework. In a servlet-based application, \texttt{WebFilter} is not part of the request processing pipeline and is effectively ignored by the servlet container.
+
+The result was that correlation IDs were never stored in MDC within internal services, meaning log statements from those services could not be correlated with the originating request.
+
+\subsubsection{The Fix}
+
+\texttt{WebFilter} was replaced with \texttt{OncePerRequestFilter} in all three internal services:
+
+\begin{lstlisting}[style=javastyle, language=Java, caption={Corrected filter in internal services}]
+/**
+ * Reads X-Correlation-Id from incoming requests and stores it in MDC.
+ * Uses OncePerRequestFilter — correct interface for servlet-based Spring MVC services.
+ * WebFilter is WebFlux only and must not be used here.
+ */
+@Component
+public class CorrelationIdPropagationFilter extends OncePerRequestFilter {
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest request,
+                                    HttpServletResponse response,
+                                    FilterChain filterChain)
+            throws ServletException, IOException {
+
+        String correlationId = request.getHeader(CORRELATION_HEADER);
+
+        if (correlationId == null || correlationId.isBlank()) {
+            correlationId = UUID.randomUUID().toString();
+        }
+
+        MDC.put(MDC_KEY, correlationId);
+        response.addHeader(CORRELATION_HEADER, correlationId);
+
+        try {
+            filterChain.doFilter(request, response);
+        } finally {
+            MDC.remove(MDC_KEY);
+        }
+    }
+}
+\end{lstlisting}
+
+\texttt{OncePerRequestFilter} is the correct abstraction for servlet-based applications. It guarantees execution exactly once per request, on the dedicated thread that processes that request from start to finish. MDC is safe in this context because Spring MVC assigns one thread per request --- the thread never changes mid-request, so the MDC value set at the start of the filter is available throughout.
+
+\subsubsection{Why MDC Works in Spring MVC but Not in WebFlux}
+
+MDC stores values in a \texttt{ThreadLocal} --- a map that is local to the current thread. In Spring MVC, each request is processed by a single dedicated thread from the moment it enters the filter chain until the response is written. The thread never changes. MDC values set at the start of a request are therefore available at any point during that request, in any component, without any additional propagation mechanism.
+
+In Spring WebFlux, the execution model is fundamentally different. Requests are processed as reactive pipelines --- sequences of asynchronous operators that may execute on different threads as the pipeline progresses. A request may begin processing on thread A, wait for a database response, and then continue on thread B. Because MDC is thread-local, any value set on thread A is invisible to thread B. This is why MDC-based correlation ID propagation is unsafe in the API Gateway, which uses Spring Cloud Gateway built on WebFlux.
+
+The correct solution for WebFlux is documented in Chapter 7.
+
+\subsection{Key Design Decisions}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lp{8cm}}
+\toprule
+\textbf{Decision} & \textbf{Rationale} \\
+\midrule
+RBAC at the gateway & Single enforcement point --- no duplication across services \\
+Role as \texttt{GrantedAuthority} & Native Spring Security integration --- \texttt{hasAuthority()} works without custom logic \\
+Coarse-grained rules at gateway & Fine-grained rules belong inside services, where domain context is available \\
+\texttt{OncePerRequestFilter} in MVC & Correct interface for servlet stack --- guaranteed single execution per request \\
+MDC for correlation in MVC & Safe in single-thread-per-request model --- no propagation mechanism needed \\
+\bottomrule
+\end{tabular}
+\caption{Security design decisions}
+\end{table}
+
+\subsection{Lessons Learned}
+
+The most important lesson from the RBAC implementation is that a JWT token carrying a role claim provides no security benefit until that claim is actually read and enforced. V1 had all the infrastructure in place --- the claim was issued, signed, and transmitted --- but the gateway never acted on it. Security must be verified end-to-end, not assumed from the presence of the right data structures.
+
+The \texttt{WebFilter} mistake in internal services is a good example of how incorrect abstractions can fail silently. There was no compilation error, no startup error, and no runtime exception --- the filter simply had no effect. This category of bug is particularly dangerous because it can go undetected for a long time. Verifying that a filter is actually executing --- through a log statement or a test --- is essential when introducing new filter-based behaviour.
+
+The distinction between \texttt{WebFilter} and \texttt{OncePerRequestFilter} reflects a broader principle: the choice of abstraction must match the execution model of the application. Spring MVC and Spring WebFlux are not interchangeable frameworks. Components written for one do not function correctly in the other.

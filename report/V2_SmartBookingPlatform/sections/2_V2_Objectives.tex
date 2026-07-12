@@ -1,0 +1,34 @@
+\section{V2 Objectives and Evolution from V1}
+
+V2 is not a rewrite. The core architecture of V1 --- six independent microservices, database-per-service, API Gateway as the single entry point, Eureka for service discovery --- remains unchanged. V2 evolves the system within that architecture, addressing the gaps identified at the end of V1.
+
+The V2 objectives were defined in five phases, ordered by impact and dependency:
+
+\begin{enumerate}
+    \item \textbf{Phase 1 --- Technical debt and correctness} --- Flyway migrations, filter corrections, MDC fix, role-based authorization, optimistic locking, and idempotency key. Correctness problems were resolved before adding new capabilities.
+    \item \textbf{Phase 2 --- Kafka hybrid model} --- asynchronous replication of stable resource data from Catalog to Booking, reducing synchronous coupling while preserving real-time validation for availability.
+    \item \textbf{Phase 3 --- Observability} --- Prometheus, Grafana, and Micrometer Tracing with Zipkin, replacing manual correlation ID logging with structured metrics and distributed traces.
+    \item \textbf{Phase 4 --- Testing and CI/CD} --- integration tests with Testcontainers, consumer-driven contract tests with Pact, and a GitHub Actions pipeline.
+    \item \textbf{Phase 5 --- Kubernetes} --- containerisation of all services, Kubernetes deployment manifests, and Flyway as the migration strategy for production schema management.
+\end{enumerate}
+
+\subsection{Why Correctness Comes First}
+
+The decision to resolve correctness issues before introducing new capabilities was deliberate. Kafka, observability, and Kubernetes are additive --- they extend the system without changing its behaviour. Concurrency bugs, incorrect filter types, and missing authorization are subtractive --- they make the system behave incorrectly regardless of what is added on top.
+
+Optimistic locking and the idempotency key were originally planned for Phase 4 alongside integration tests. They were moved to Phase 1 after recognising that concurrency is a correctness property, not a performance optimisation. A system that may create duplicate bookings under concurrent load is incorrect by definition, regardless of how well it is observed or how cleanly it is deployed.
+
+\subsection{Continuity with V1}
+
+V2 preserves all V1 design decisions that remain valid:
+
+\begin{itemize}
+    \item Database-per-service pattern --- each service owns its schema and data
+    \item Stateless JWT authentication centralised at the API Gateway
+    \item OpenFeign for synchronous inter-service communication
+    \item Resilience4j retry, circuit breaker, and time limiter on Catalog calls
+    \item RabbitMQ for centralised logging with correlation ID propagation
+    \item Eureka for service discovery
+\end{itemize}
+
+Where V1 decisions are replaced or extended, this report explains the reasoning explicitly.

@@ -1,0 +1,31 @@
+\section{Introduction}
+
+The SmartBookingPlatform V2 is the evolution of a microservices-based booking platform originally developed as a learning and architecture exercise in V1. Where V1 focused on establishing the foundational patterns of a distributed system --- service decomposition, API gateway routing, JWT authentication, service discovery, and centralised logging --- V2 focuses on correctness, production readiness, and architectural maturity.
+
+V1 demonstrated that the core patterns worked. V2 addresses what V1 deliberately left out: schema stability, security enforcement, concurrency protection, asynchronous communication, observability, and automated testing across service boundaries.
+
+This report documents the architectural decisions, implementation details, and lessons learned across each area of improvement. It is structured by theme rather than by implementation phase, following the same approach as the V1 report: each chapter explains the problem, the decision taken, the trade-offs accepted, and what was learned in the process.
+
+\subsection{What V1 Established}
+
+V1 delivered six independent microservices --- API Gateway, Auth Service, Catalog Service, Booking Service, Log Service, and Discovery Service --- each with a clear responsibility, its own PostgreSQL database, and a well-defined contract with the rest of the system.
+
+The core infrastructure included JWT-based stateless authentication centralised at the API Gateway, synchronous inter-service communication via OpenFeign with Resilience4j resilience patterns, centralised logging over RabbitMQ with correlation ID propagation, and load testing with k6. The test suite closed at 72 passing unit tests across 17 test classes.
+
+\subsection{Known Limitations Entering V2}
+
+The V1 report was explicit about its limitations. The following were carried forward as the V2 agenda:
+
+\begin{itemize}
+    \item \textbf{Schema management} --- all services used \texttt{ddl-auto: create-drop}, destroying all data on every restart. No versioned migrations existed.
+    \item \textbf{Security enforcement} --- the JWT token contained a role claim but no role-based authorization was implemented. All authenticated requests were treated equally.
+    \item \textbf{Concurrency} --- booking conflict detection relied on application-level checks with no database-level protection against concurrent requests.
+    \item \textbf{Incorrect filter types} --- internal services used \texttt{WebFilter}, the WebFlux interface, despite being servlet-based Spring MVC services.
+    \item \textbf{MDC in a reactive pipeline} --- the API Gateway used MDC for correlation ID propagation, which is thread-local and unsafe in a WebFlux environment where requests may be processed across multiple threads.
+    \item \textbf{Synchronous coupling} --- the Booking Service depended entirely on the Catalog Service at request time, including for data that rarely changes.
+    \item \textbf{No integration tests} --- all tests mocked their dependencies. No end-to-end flow was validated across real services and databases.
+    \item \textbf{No observability tooling} --- no metrics, no dashboards, no distributed tracing UI.
+    \item \textbf{No container orchestration} --- services were managed by shell scripts on a local machine.
+\end{itemize}
+
+V2 addresses each of these systematically.

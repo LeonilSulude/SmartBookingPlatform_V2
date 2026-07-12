@@ -1,0 +1,139 @@
+\documentclass[12pt, a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{parskip}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{amsmath}
+
+\geometry{margin=2.5cm}
+
+% Code listing style
+\definecolor{codegray}{rgb}{0.95,0.95,0.95}
+\definecolor{commentcolor}{rgb}{0.4,0.4,0.4}
+\definecolor{keywordcolor}{rgb}{0.13,0.29,0.53}
+\definecolor{stringcolor}{rgb}{0.31,0.60,0.02}
+
+\lstdefinestyle{javastyle}{
+    backgroundcolor=\color{codegray},
+    commentstyle=\color{commentcolor}\itshape,
+    keywordstyle=\color{keywordcolor}\bfseries,
+    stringstyle=\color{stringcolor},
+    basicstyle=\ttfamily\small,
+    breakatwhitespace=false,
+    breaklines=true,
+    keepspaces=true,
+    numbers=left,
+    numberstyle=\tiny\color{commentcolor},
+    showspaces=false,
+    showstringspaces=false,
+    tabsize=4,
+    frame=single,
+    rulecolor=\color{black!20}
+}
+
+\lstdefinestyle{yamlstyle}{
+    backgroundcolor=\color{codegray},
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    frame=single,
+    rulecolor=\color{black!20}
+}
+
+\lstdefinestyle{sqlstyle}{
+    backgroundcolor=\color{codegray},
+    commentstyle=\color{commentcolor}\itshape,
+    keywordstyle=\color{keywordcolor}\bfseries,
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    frame=single,
+    rulecolor=\color{black!20},
+    morekeywords={CREATE, TABLE, IF, NOT, EXISTS, ALTER, ADD, COLUMN, PRIMARY, KEY, DEFAULT, REFERENCES, UNIQUE, INDEX, BIGINT, UUID, VARCHAR, BOOLEAN, TIMESTAMP, NUMERIC, INTEGER}
+}
+
+% Header and footer
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{SmartBookingPlatform V2}
+\lhead{Leonil Sulude}
+\rfoot{\thepage}
+
+% Section formatting
+\titleformat{\section}{\large\bfseries}{{\thesection}}{1em}{}
+\titleformat{\subsection}{\normalsize\bfseries}{{\thesubsection}}{1em}{}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=black,
+    urlcolor=blue,
+    citecolor=black
+}
+
+\begin{document}
+
+% Title page
+\begin{titlepage}
+    \centering
+    \vspace*{2cm}
+    {\Huge\bfseries SmartBookingPlatform\par}
+    \vspace{0.5cm}
+    {\Large Microservices Architecture Report --- V2\par}
+    \vspace{2cm}
+    {\large Leonil Sulude\par}
+    \vspace{0.5cm}
+    {\large April 23, 2026\par}
+    \vfill
+\end{titlepage}
+
+% Table of contents
+\tableofcontents
+\newpage
+
+% Sections
+\input{sections/1_Introduction}
+\newpage
+
+\input{sections/2_V2_Objectives}
+\newpage
+
+\input{sections/3_Architecture}
+\newpage
+
+\input{sections/4_Schema_Management}
+\newpage
+
+\input{sections/5_Security}
+\newpage
+
+\input{sections/6_Concurrency}
+\newpage
+
+\input{sections/7_Observability}
+\newpage
+
+\input{sections/8_Kafka}
+\newpage
+
+\input{sections/9_Testing}
+\newpage
+
+\input{sections/10_Deployment}
+\newpage
+
+\input{sections/11_Tradeoffs}
+\newpage
+
+\input{sections/12_Roadmap}
+\newpage
+
+\input{sections/13_Conclusion}
+
+\end{document}

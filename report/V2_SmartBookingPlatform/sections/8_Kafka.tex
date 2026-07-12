@@ -1,0 +1,249 @@
+\section{Inter-Service Communication --- Kafka Hybrid Model}
+
+V1 used synchronous communication exclusively. Every booking request triggered a call to the Catalog Service via OpenFeign to retrieve resource data --- including stable data like name, price, and duration that rarely changes. This created a hard runtime dependency: if the Catalog Service was unavailable, booking creation was completely blocked.
+
+V2 introduces Apache Kafka as a second communication channel, implementing a hybrid model: asynchronous event-driven replication for stable data, synchronous calls retained only where real-time accuracy is required.
+
+\subsection{Why Kafka --- and Why Not Replace OpenFeign Entirely}
+
+The goal was not to eliminate synchronous communication but to reduce it to the cases where it is genuinely necessary. Not all data has the same consistency requirements.
+
+Stable resource data --- name, price, duration --- changes infrequently and deliberately. A stale copy of this data in the Booking Service carries low risk: a booking created with yesterday's price is an edge case, not a systemic failure.
+
+Availability data --- unavailable periods, active status --- changes dynamically and has direct business consequences. Accepting a booking based on a stale availability snapshot could result in a double-booking, which violates the core business invariant of the system.
+
+This distinction drives the hybrid model: replicate stable data asynchronously via Kafka, keep synchronous validation for time-sensitive constraints.
+
+\subsection{Kafka Configuration}
+
+\subsubsection{Infrastructure}
+
+Kafka runs in KRaft mode --- without Zookeeper --- using the \texttt{apache/kafka:3.7.0} image. KRaft (Kafka Raft) is the modern consensus mechanism introduced in Kafka 2.8 and production-ready from Kafka 3.3, which embeds cluster coordination directly into the broker without an external dependency.
+
+\begin{lstlisting}[style=yamlstyle, caption={Kafka KRaft configuration in docker-compose.yaml}]
+kafka:
+  image: apache/kafka:3.7.0
+  environment:
+    KAFKA_NODE_ID: 1
+    KAFKA_PROCESS_ROLES: broker,controller  # single node acts as both
+    KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+    KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+    KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+    KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+\end{lstlisting}
+
+The \texttt{KAFKA\_LISTENERS} defines where Kafka listens internally. The \texttt{KAFKA\_ADVERTISED\_LISTENERS} defines the address announced to clients --- the Spring Boot services running on the host. Using \texttt{host.docker.internal} or \texttt{localhost} here is a Windows/Docker Desktop consideration: containers on the same Docker network resolve each other by container name, but services running on the host machine need the host-accessible address.
+
+\subsubsection{Producer Configuration --- Catalog Service}
+
+\begin{lstlisting}[style=yamlstyle, caption={Kafka producer configuration in catalog-service application.yaml}]
+spring:
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        spring.json.add.type.headers: false  # omit Java type headers — keeps messages portable
+\end{lstlisting}
+
+The \texttt{spring.json.add.type.headers: false} setting deserves explanation. By default, the Spring Kafka \texttt{JsonSerializer} embeds the fully qualified Java class name in a message header --- for example \texttt{leonil.sulude.catalog.dto.ResourceEventDTO}. The consumer then uses this header to determine the deserialization target class.
+
+This creates cross-service coupling at the class level: the Booking Service would need to have a class with the exact same package and name as the Catalog Service. Disabling type headers removes this dependency. Messages become plain JSON, and each service defines its own local DTO for deserialization.
+
+\subsubsection{Consumer Configuration --- Booking Service}
+
+\begin{lstlisting}[style=yamlstyle, caption={Kafka consumer configuration in booking-service application.yaml}]
+spring:
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: booking-service
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "leonil.sulude.catalog.dto"
+        spring.json.value.default.type: "leonil.sulude.booking.dto.ResourceCacheEventDTO"
+\end{lstlisting}
+
+The \texttt{group-id} defines the consumer group. Kafka guarantees that each message in a topic is delivered to exactly one consumer within a group. If multiple instances of the Booking Service were running, Kafka would distribute the partitions between them --- each message processed once across the group.
+
+The \texttt{auto-offset-reset: earliest} is critical for the cold start scenario. When the Booking Service starts for the first time with no committed offset, it reads from the beginning of the topic, processing all historical events. This ensures the cache is populated even if the service missed events published before its first startup.
+
+\subsection{Event Design}
+
+\subsubsection{Event Types}
+
+Four event types cover the full resource lifecycle:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{ll}
+\toprule
+\textbf{Event} & \textbf{Trigger} \\
+\midrule
+\texttt{RESOURCE\_CREATED} & New resource added to the Catalog \\
+\texttt{RESOURCE\_UPDATED} & Name, price, or duration changed \\
+\texttt{RESOURCE\_ACTIVATED} & Previously deactivated resource re-enabled \\
+\texttt{RESOURCE\_DEACTIVATED} & Resource marked as inactive \\
+\bottomrule
+\end{tabular}
+\caption{Resource lifecycle events published to Kafka}
+\end{table}
+
+\texttt{RESOURCE\_ACTIVATED} and \texttt{RESOURCE\_DEACTIVATED} are separate event types rather than a generic \texttt{RESOURCE\_UPDATED} with an \texttt{active} flag. This is a deliberate design decision: consumers benefit from explicit event semantics. A monitoring dashboard that counts deactivation events provides more insight than one that filters update events by a field value.
+
+\subsubsection{Decoupled DTOs}
+
+The Catalog Service publishes \texttt{ResourceEventDTO}. The Booking Service deserializes into \texttt{ResourceCacheEventDTO}. These are separate classes in separate packages --- the Booking Service does not import anything from the Catalog Service.
+
+\begin{lstlisting}[style=javastyle, language=Java, caption={ResourceCacheEventDTO in the Booking Service}]
+/**
+ * DTO for Kafka events published by the Catalog Service.
+ * Kept separate from Catalog's ResourceEventDTO to avoid cross-service coupling.
+ * eventType is String — the Booking Service does not depend on Catalog's enum.
+ */
+public record ResourceCacheEventDTO(
+        String eventType,
+        UUID resourceId,
+        String name,
+        BigDecimal price,
+        Integer durationInMinutes,
+        boolean active
+) {}
+\end{lstlisting}
+
+The \texttt{eventType} field is a \texttt{String} rather than the \texttt{ResourceEventType} enum defined in the Catalog Service. Importing the enum would create a compile-time dependency on the Catalog module. Using a \texttt{String} keeps the services independent --- a change to the enum in the Catalog does not require a recompile of the Booking Service.
+
+This is the correct trade-off for inter-service messaging: the contract is the JSON structure, not the Java types. The formal verification of this contract belongs to consumer-driven contract tests (Pact), planned for Phase 4.
+
+\subsection{Cache Population Strategy}
+
+\subsubsection{The Cold Start Problem}
+
+Kafka delivers events from the moment a consumer is running. A freshly started Booking Service with no committed offset would have an empty cache, missing all resources created before its first startup.
+
+Three strategies were considered:
+
+\begin{enumerate}
+    \item \textbf{Replay from offset 0} --- read all historical events from the beginning of the topic on every startup. Correct but requires the topic to retain all events indefinitely, turning Kafka into a primary data store rather than a message bus.
+    \item \textbf{Seed via API on startup} --- call the Catalog Service once on startup to fetch all active resources, then rely on Kafka for incremental updates. Uses each system for what it does best: the database provides historical state, Kafka provides change propagation.
+    \item \textbf{Cache miss fallback} --- start with an empty cache and fall back to OpenFeign on every miss, populating the cache organically.
+\end{enumerate}
+
+Strategy 2 was chosen, with Strategy 3 as a safety net. The reasoning: forcing Kafka to retain all events forever to support cold starts would be overengineering the message bus. The database already stores historical state reliably and efficiently. A slightly slower startup is preferable to misusing the infrastructure.
+
+\subsubsection{Seed Implementation}
+
+The \texttt{ResourceCacheSeeder} uses \texttt{@EventListener(ApplicationReadyEvent.class)} rather than \texttt{@PostConstruct}. The distinction is significant: \texttt{@PostConstruct} runs during bean initialisation, before Eureka registration is complete and before Feign clients are configured. Attempting to call the Catalog Service at this point would fail because the service has not yet been discovered.
+
+\texttt{ApplicationReadyEvent} fires after the entire application context is ready, Eureka has registered the service, and the embedded server is accepting connections. At this point the Feign client can safely resolve and call the Catalog Service.
+
+The seeder is annotated with \texttt{@Component} rather than \texttt{@Service} or \texttt{@RestController}. It does not expose endpoints and does not contain business logic --- it is an infrastructure component that orchestrates a startup task. \texttt{@Component} is the most accurate annotation for this role.
+
+\subsubsection{Retry on Startup}
+
+If the Catalog Service is unavailable when the seeder runs --- for example, if both services start simultaneously and the Catalog is not yet ready --- the seeder would fail silently with an empty cache.
+
+Spring Retry was added to make the seeder resilient:
+
+\begin{lstlisting}[style=javastyle, language=Java, caption={Retry configuration on the seeder}]
+@Retryable(
+        retryFor = Exception.class,
+        maxAttempts = 3,
+        backoff = @Backoff(delay = 1000, multiplier = 2)  // 1s, 2s, 4s
+)
+public void attemptSeed() {
+    List<ServiceResourceResponseDTO> resources = catalogClient.getAllActiveResources();
+    // ... populate cache
+}
+
+@Recover
+public void recover(Exception ex) {
+    log.warn("Failed to seed cache after all retries. Starting with empty cache.");
+}
+\end{lstlisting}
+
+Spring Retry was chosen over Resilience4j for this case. Resilience4j is optimised for protecting synchronous inter-service HTTP calls in production --- it integrates natively with Feign and Spring Cloud. Spring Retry is a general-purpose retry mechanism suitable for any method, including startup operations. Using Resilience4j here would be applying a production resilience pattern to a development-time initialisation concern.
+
+\subsection{Two-Tier Resource Resolution}
+
+The \texttt{resolveResource} method in \texttt{BookingServiceImpl} implements the cache-first strategy:
+
+\begin{lstlisting}[style=javastyle, language=Java, caption={Two-tier resource resolution in BookingServiceImpl}]
+private ServiceResourceResponseDTO resolveResource(UUID resourceId) {
+    Optional<ResourceCache> cached = resourceCacheRepository.findById(resourceId);
+
+    if (cached.isPresent()) {
+        ResourceCache cache = cached.get();
+        // fetch unavailable periods from Catalog — time-sensitive, cannot be stale
+        ServiceResourceResponseDTO fromCatalog = fetchResource(resourceId);
+        return new ServiceResourceResponseDTO(
+                cache.getId(), cache.getName(), cache.getPrice(),
+                cache.getDurationInMinutes(), cache.isActive(),
+                fromCatalog != null ? fromCatalog.unavailablePeriods() : List.of()
+        );
+    }
+
+    // cache miss — fetch everything from Catalog and populate cache
+    ServiceResourceResponseDTO resource = fetchResource(resourceId);
+    if (resource != null) {
+        resourceCacheRepository.save(ResourceCache.builder()
+                .id(resource.id()).name(resource.name()).price(resource.price())
+                .durationInMinutes(resource.durationInMinutes()).active(resource.active())
+                .lastUpdated(LocalDateTime.now()).build());
+    }
+    return resource;
+}
+\end{lstlisting}
+
+Even when the cache contains the resource, the Catalog Service is still called --- but only for the \texttt{unavailablePeriods}. This is the key distinction of the hybrid model: stable data (name, price, duration, active status) comes from the cache; dynamic data (availability) always comes from the source of truth.
+
+\subsection{Idempotency Key and Cache}
+
+The current implementation stores idempotency keys in the \texttt{bookings} table with a \texttt{UNIQUE} constraint. Every \texttt{POST /api/bookings} with an idempotency key performs a database lookup before processing.
+
+In a high-concurrency scenario --- such as a limited-seat event with many simultaneous booking attempts --- this lookup adds database load for every request, including requests with no previous processing history.
+
+The correct improvement is to introduce a distributed cache (Redis) with a TTL for idempotency keys. The lookup would hit Redis first (in-memory, sub-millisecond), falling back to the database only for confirmed duplicates. The database remains the source of truth; Redis absorbs the lookup load.
+
+As one framing puts it: idempotency keys are stored in the database for correctness. As a future improvement, a caching layer like Redis with TTL would reduce database load and avoid unbounded growth, while keeping the database as the source of truth.
+
+This is a known limitation of the V2 implementation, documented as a V3 item.
+
+\subsection{Soft Delete and Event-Driven Integrity}
+
+Physical delete of a resource was removed entirely from the Catalog Service. The reason is architectural: the Booking Service stores only a \texttt{resourceId} reference with no foreign key constraint to the Catalog database. Physically deleting a resource would orphan any booking that references it --- a confirmed reservation with no associated data.
+
+The correct long-term solution requires the Booking Service to publish events when bookings complete or are cancelled, and the Catalog Service to maintain a counter of active bookings per resource. Physical delete would only be permitted when this counter reaches zero.
+
+This requires bidirectional Kafka communication and was deferred to V3. For V2, resources are deactivated rather than deleted. The event-driven model is the correct foundation for this evolution.
+
+\subsection{Trade-offs}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lp{9cm}}
+\toprule
+\textbf{Aspect} & \textbf{Impact} \\
+\midrule
+Reduced Catalog coupling & Stable data served from cache — Catalog unavailability no longer blocks booking creation for cached resources \\
+Retained consistency & Unavailable periods always fetched from Catalog — no risk of stale availability data causing double-bookings \\
+Cache staleness window & Between a Catalog update and the Kafka event being consumed, the cache may be briefly stale for stable data \\
+Cold start dependency & Seed on startup requires Catalog availability — mitigated by Spring Retry and OpenFeign fallback \\
+Operational complexity & Kafka adds infrastructure to manage, monitor, and reason about \\
+Contract without verification & Producer/consumer DTO contract is informal — no automated verification until Pact is introduced in Phase 4 \\
+\bottomrule
+\end{tabular}
+\caption{Kafka hybrid model trade-offs}
+\end{table}
+
+\subsection{Lessons Learned}
+
+The most important lesson is that communication patterns should be chosen based on the nature of the data, not applied uniformly. Replacing all OpenFeign calls with Kafka would have introduced eventual consistency risks for availability data. Keeping all calls synchronous would have preserved the tight coupling that the hybrid model was designed to reduce. The correct answer was neither extreme.
+
+The KRaft configuration for Kafka on Windows with Docker Desktop required significant debugging. The error \texttt{advertised.listeners cannot use the nonroutable meta-address 0.0.0.0} persisted across multiple image versions because the \texttt{StorageTool} validation in newer versions is stricter. The solution was to use \texttt{apache/kafka:3.7.0}, which has different validation behaviour, and to ensure \texttt{KAFKA\_LISTENERS} and \texttt{KAFKA\_ADVERTISED\_LISTENERS} are correctly separated --- the former uses \texttt{0.0.0.0} for internal binding, the latter uses \texttt{localhost} for external announcement.
+
+The \texttt{@EventListener(ApplicationReadyEvent.class)} vs \texttt{@PostConstruct} distinction matters whenever a Spring Boot application makes network calls during startup. \texttt{@PostConstruct} runs before the application is fully ready; \texttt{ApplicationReadyEvent} runs after. Using the wrong one produces failures that are difficult to diagnose because the error message points to the network call, not the timing problem.
+\end{lstlisting}

@@ -1,0 +1,63 @@
+\section{Continuous Integration --- GitHub Actions}
+\label{sec:ci}
+
+Phase 4 pairs the testing work from Section~\ref{sec:testing} with automating it: a GitHub Actions pipeline that runs the full unit and integration suite --- including the Pact contract tests from Section~\ref{sec:pact} --- on every push and pull request to \texttt{main}, without requiring anyone to remember to run \texttt{mvn verify} locally first.
+
+\subsection{Pipeline Overview}
+
+The workflow (\texttt{.github/workflows/ci.yml}) defines two jobs, each a matrix over the six services (\texttt{api-gateway}, \texttt{auth-service}, \texttt{booking-service}, \texttt{catalog-service}, \texttt{discovery-service}, \texttt{log-service}):
+
+\begin{lstlisting}[style=yamlstyle, caption={Pipeline shape --- two matrix jobs, one gating the other}]
+unit-tests (matrix: 6 services)
+  -> ./mvnw test      # Surefire, *Test.java / *Tests.java, no Docker
+
+integration-tests (needs: unit-tests, matrix: 6 services)
+  -> ./mvnw verify     # Failsafe, *IT.java, Testcontainers + Pact verification
+\end{lstlisting}
+
+Since there is no aggregator \texttt{pom.xml} --- each service builds independently, as noted in Section~\ref{sec:testing} --- the matrix strategy is not an optimisation so much as a structural necessity: there is no single Maven invocation that would build all six services together, so the pipeline has to run six independent builds regardless, and doing so in parallel matrix legs costs nothing extra.
+
+\subsection{Docker on the Runner --- No Docker-in-Docker Required}
+
+A natural first question when moving Testcontainers-based tests into CI is whether the runner needs Docker-in-Docker configured. It does not: GitHub-hosted \texttt{ubuntu-latest} runners ship with a Docker daemon already installed and running. Testcontainers talks to that daemon directly over the existing socket, exactly as it does on a developer's own machine --- no \texttt{services:} block, no privileged container, no extra setup step. The \texttt{integration-tests} job's only Testcontainers-specific line in the workflow is the command itself (\texttt{./mvnw verify}); everything else is identical to the \texttt{unit-tests} job. Ryuk, the sidecar Testcontainers uses to clean up orphaned containers, also runs unmodified in this environment.
+
+\subsection{Separating Unit and Integration Tests in CI}
+
+The two-job split exists to make the \texttt{needs: unit-tests} dependency meaningful. Because \texttt{unit-tests} is itself a matrix, \texttt{integration-tests} only starts once \emph{every} matrix leg of \texttt{unit-tests} has passed --- if any single service fails its fast, Docker-free tests, the entire integration stage is skipped, rather than spending CI minutes booting Postgres, Kafka, and RabbitMQ containers for a change that is already known to be broken.
+
+One implementation detail is worth recording honestly rather than glossing over. The first attempt tried to avoid \texttt{integration-tests} redundantly re-running the (already-passed) unit tests inside its own \texttt{mvn verify} call, using \texttt{-Dsurefire.skip=true} to skip only Surefire while leaving Failsafe's integration-test execution untouched. Tested directly: the flag had no effect at all --- the unit tests ran again regardless. A second attempt, \texttt{-DskipTests}, was tested next and found to skip \emph{both} Surefire and Failsafe together, since Failsafe deliberately honours the same generic property for consistency --- the opposite of what was needed. Rather than keep guessing at under-documented Maven property semantics, the pipeline simply runs plain \texttt{mvn verify} in the integration job, accepting a few redundant seconds of unit-test re-execution per service in exchange for a command whose behaviour is unambiguous. The \texttt{needs:} job dependency already delivers the actual fail-fast requirement --- not spinning up infrastructure for known-broken code --- independently of whether the second job's own Maven invocation happens to repeat cheap work.
+
+\subsection{Maven Dependency Caching}
+
+\texttt{actions/setup-java}'s built-in \texttt{cache: maven} option caches \texttt{\textasciitilde/.m2/repository} --- the downloaded dependency \texttt{.jar}s (Spring Boot, Testcontainers, Pact-JVM, and the rest of the shared stack), not compiled project output. The cache key is derived from a hash of every \texttt{pom.xml} in the repository, so it invalidates automatically whenever a dependency changes. Because the six services share the large majority of that stack, the cache is effectively shared across the whole matrix: whichever leg happens to run first populates it, and every other leg gets a cache hit instead of re-downloading dependencies that would otherwise be fetched independently twelve times per pipeline run --- six services, two jobs each.
+
+\subsection{Test Reporting}
+
+Each job publishes results two ways: \texttt{dorny/test-reporter} reads the Surefire/Failsafe JUnit XML output and renders a pass/fail summary with inline annotations in the GitHub Checks tab, and \texttt{actions/upload-artifact} retains the raw XML reports for seven days for deeper inspection. The reporting step is marked \texttt{continue-on-error: true} deliberately: \texttt{api-gateway} and \texttt{discovery-service} do not yet have any \texttt{*IT.java} tests, so their \texttt{integration-tests} leg produces no Failsafe report at all, and the pipeline's actual pass/fail verdict must remain governed by the \texttt{mvn test}/\texttt{mvn verify} step itself, not by a reporting action that has nothing to read.
+
+\subsection{Bugs Discovered While Wiring CI}
+
+Consistent with the pattern from Section~\ref{sec:bugs-found} --- shared-state and lifecycle assumptions that only surface once code runs somewhere other than a developer's own, already-configured machine --- building this pipeline surfaced four real problems in the existing test suite, none of which had anything to do with business logic.
+
+\subsubsection{The Maven Wrapper Was Not Executable in Git}
+
+All six \texttt{mvnw} scripts were tracked in git with mode \texttt{100644} rather than \texttt{100755}, almost certainly because the project has been developed exclusively on Windows, where the executable bit is easy to lose on commit. A Linux CI runner invoking \texttt{./mvnw} would have failed immediately with \texttt{Permission denied}, before a single test ran. Fixed directly via \texttt{git update-index --chmod=+x} on all six wrappers, rather than working around it with a \texttt{chmod} step in the workflow --- the wrapper should simply be executable in the repository itself, on any platform that checks it out.
+
+\subsubsection{Contract Tests Misclassified as Fast Unit Tests}
+
+The two Pact provider verification tests added alongside the contract tests themselves (Section~\ref{sec:pact}) both extend \texttt{AbstractIntegrationTest} and require real Testcontainers infrastructure, but were initially named \texttt{CatalogServiceHttpPactVerificationTest} and \texttt{ResourceEventsMessagePactVerificationTest} --- matching Surefire's default \texttt{*Test.java} include pattern, and therefore destined to run during the supposedly Docker-free \texttt{unit-tests} job. Renamed to \texttt{CatalogServiceHttpPactVerificationIT} and \texttt{ResourceEventsMessagePactVerificationIT}.
+
+\subsubsection{The Same Mistake, Already Present Before This Session}
+
+Checking for that exact pattern elsewhere in the codebase found it was not a new mistake. Maven Surefire's default include patterns match \emph{both} \texttt{*Test.java} and \texttt{*Tests.java} --- and Spring Boot's own generated smoke-test naming convention, \texttt{XxxApplicationTests}, falls squarely into the second pattern. Three of these smoke tests (\texttt{BookingServiceApplicationTests}, \texttt{CatalogServiceApplicationTests}, \texttt{LogServiceApplicationTests}) already extended \texttt{AbstractIntegrationTest} following the fix described in Section~\ref{sec:failsafe}, but had never been renamed to \texttt{*IT.java} when that fix was made --- so despite genuinely needing Testcontainers, they were still bound to run under Surefire. The same was true of three separate \texttt{LogEventProducerTest} classes (auth, booking, catalog services), each starting its own \texttt{RabbitMQContainer}. All six were renamed to their \texttt{*IT.java} equivalents (e.g. \texttt{BookingServiceApplicationIT}, \texttt{LogEventProducerIT}).
+
+\subsubsection{One Genuinely Broken Test, Not Just Misnamed}
+
+Applying the same check to \texttt{auth-service} surfaced something categorically different: \texttt{AuthServiceApplicationTests} was not a Testcontainers test wearing the wrong file extension --- it was still the original, unmigrated \texttt{@SpringBootTest} smoke test, with no Testcontainers wiring at all, silently depending on a Postgres instance already running on \texttt{localhost:5432}. Running it in isolation failed outright with a Flyway connection error. This directly contradicts the commit message from the session that migrated the other services' smoke tests, which claimed the fix had been applied to ``all five services'' --- Auth Service was, in fact, missed. It had passed undetected up to this point for the same reason the report has already documented once (Section~\ref{sec:failsafe}): a manually-running \texttt{docker-compose} stack from an earlier session happened to still be up, masking the dependency. Fixed the same way as its siblings --- migrated to extend \texttt{AbstractIntegrationTest} and renamed to \texttt{AuthServiceApplicationIT} --- and confirmed independently with a clean \texttt{mvn clean verify} run.
+
+\medskip
+\noindent Every one of the six services was re-verified end-to-end after these fixes with a full \texttt{mvn clean verify}: fast unit tests with zero Testcontainers activity, followed by every integration and contract test passing against real Postgres, Kafka, RabbitMQ, and the Pact provider verifications.
+
+\subsection{Deliberately Out of Scope}
+
+This pipeline stops at \texttt{mvn verify}. It does not build or publish Docker images, and it does not deploy anywhere --- both are Phase 5 (Kubernetes manifests) and V3 (Terraform against AWS) concerns respectively, and adding either now would be building infrastructure ahead of the Dockerfiles and Terraform configuration that Phase 5 and V3 are specifically responsible for producing. When V3 introduces AWS deployment, the natural extension is a further job, gated with \texttt{needs: integration-tests} and restricted to pushes on \texttt{main}, authenticating to AWS via OIDC rather than long-lived static credentials, and running \texttt{terraform apply} --- extending this pipeline rather than replacing it.
