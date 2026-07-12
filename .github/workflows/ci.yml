@@ -15,7 +15,14 @@ jobs:
     name: Unit Tests (${{ matrix.service }})
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: true
+      # false, not true: a fail-fast cancellation kills the Maven process for every other
+      # service mid-run, and a killed Surefire process can leave partial/misleading XML
+      # reports behind that dorny/test-reporter renders as "failed" even though nothing
+      # was actually wrong with that service — exactly what happened when auth-service's
+      # one real failure made api-gateway, catalog-service, booking-service, and
+      # discovery-service all show up as failing too. Seeing every service's real result
+      # is worth the extra CI minutes.
+      fail-fast: false
       matrix:
         service:
           - api-gateway
