@@ -25,13 +25,17 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
  * what this specific test exercises) and adds its own RabbitMQ container following the
  * same singleton pattern — started once in a static block, never stopped explicitly.
  *
+ * IT suffix (not Test) --- needs a real Testcontainers RabbitMQ broker (plus Postgres/Kafka
+ * via AbstractIntegrationTest), so it must run under Failsafe (mvn verify), not Surefire
+ * (mvn test), like every other integration test in this service.
+ *
  * Note: LogEventProducer.send() is never actually invoked from any business code path
  * in this service (nor was it in V1) — this test only proves the publish mechanism itself
  * works. See the report for this documented gap and the V3 direction (consolidating
  * audit logging as an additional Kafka consumer group on the existing business topics,
  * removing RabbitMQ entirely).
  */
-class LogEventProducerTest extends AbstractIntegrationTest {
+class LogEventProducerIT extends AbstractIntegrationTest {
 
     static final RabbitMQContainer rabbitMQ;
 
