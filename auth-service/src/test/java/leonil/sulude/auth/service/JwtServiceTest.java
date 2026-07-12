@@ -171,8 +171,20 @@ class JwtServiceTest {
                 "USER"
         );
 
-        // Tamper the token by changing one character
-        String tamperedToken = token.substring(0, token.length() - 1) + "X";
+        // Flip a character roughly in the middle of the token rather than the last one.
+        // The old version changed only the final character, which for a base64-encoded
+        // 256-bit signature (6 bits/char) can land on a "don't care" padding boundary with
+        // no real information in it — sometimes leaving the underlying signature bytes
+        // unchanged, so the "tampered" token was still valid. Since the token is timestamped
+        // fresh every run, whether that happened varied from run to run, making the test
+        // flaky rather than reliably red. The middle of the token falls within the payload
+        // segment, so changing it always invalidates the signature deterministically.
+        int tamperIndex = token.length() / 2;
+        char originalChar = token.charAt(tamperIndex);
+        char replacementChar = originalChar == 'A' ? 'B' : 'A';
+        String tamperedToken = token.substring(0, tamperIndex)
+                + replacementChar
+                + token.substring(tamperIndex + 1);
 
         assertFalse(jwtService.isTokenValid(tamperedToken),
                 "Modified token should be invalid");
