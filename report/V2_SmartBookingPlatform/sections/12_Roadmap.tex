@@ -1,0 +1,45 @@
+\section{Roadmap}
+
+The preceding sections document what V2 actually built. This section places that work inside the larger arc the project is following --- where it came from, what closes it out, and what comes after.
+
+\subsection{V1 --- Foundation (Complete)}
+
+V1 established that the core patterns of a distributed system work: six independent microservices, stateless JWT authentication centralised at the API Gateway, OpenFeign with Resilience4j for synchronous inter-service calls, RabbitMQ for centralised logging, and k6 load testing, backed by 72 unit tests. It was deliberately narrow in scope --- correctness gaps, missing authorization enforcement, and the complete absence of integration testing were known and left for V2, as described in the Introduction.
+
+\subsection{V2 --- Production-Ready Backend (Nearly Complete)}
+
+V2's objective was a complete platform, running locally, close to what a real production backend would look like --- not a rewrite, but V1's architecture matured across every axis that mattered: correctness, security, testing, and observability, each covered in its own chapter above. Architecture closed the schema-management, concurrency, and coupling gaps V1 left open; security added role-based authorization at the gateway; testing added Testcontainers-backed integration tests across all six services, Pact contract tests with real provider verification, and a GitHub Actions pipeline that runs both automatically; observability added correlation IDs propagated correctly through a reactive pipeline, Prometheus, Grafana, and Zipkin.
+
+What remains to close V2 is the local platform itself:
+
+\begin{itemize}
+    \item \textbf{Dockerfiles per service} --- each of the six services packaged as its own image, rather than run via \texttt{mvnw spring-boot:run} against manually-started infrastructure.
+    \item \textbf{Local Kubernetes (Minikube)} --- Deployments, Services, ConfigMaps, Secrets, and Ingress for the full platform, so that ``the system runs'' means a cluster, not a shell script starting six JVMs.
+    \item \textbf{Helm} --- deliberately not prioritised. Kubernetes itself is the skill this phase exists to demonstrate; Helm is packaging tooling layered on top of it, not a distinct architectural capability. Plain manifests are sufficient to show the same competence, and are simpler to reason about while the manifests themselves are still being got right. Revisiting Helm once the raw manifests are stable is a reasonable V3-or-later addition, not a V2 blocker.
+    \item \textbf{Branch protection on \texttt{main}} --- deferred rather than skipped; see Section~\ref{sec:tradeoffs}.
+\end{itemize}
+
+Once the platform runs end-to-end on local Kubernetes, V2 is closed.
+
+\subsection{V3 --- Cloud}
+
+V3's objective is to migrate the platform this project already understands --- because it now runs locally on Kubernetes --- onto real AWS infrastructure, using the local Kubernetes deployment as a mental map of what each managed AWS service replaces:
+
+\begin{itemize}
+    \item \textbf{Terraform} as the infrastructure-as-code layer for everything below.
+    \item \textbf{Core AWS} --- IAM, VPC, EC2, Security Groups, an Application Load Balancer, Route53, and CloudWatch.
+    \item \textbf{RDS} in place of the local PostgreSQL containers.
+    \item \textbf{ElastiCache (Redis)} in place of local Redis --- and, concretely, replacing the current database-backed idempotency-key check (the Concurrency chapter) with a Redis-backed one: O(1) instead of O($\log n$), and the natural place to put the velocity checks V4's fraud detection work will need.
+    \item \textbf{ECS} in place of local Docker/Kubernetes for actually running the containers.
+    \item \textbf{A deploy pipeline}: Docker build, push, \texttt{terraform apply}, deploy.
+    \item \textbf{GitHub Actions extended} with a deploy job, gated to pushes on \texttt{main}, authenticating to AWS via OIDC rather than long-lived static credentials --- the natural continuation of the CI pipeline built in this phase (Section~\ref{sec:ci}), not a replacement for it.
+    \item \textbf{A basic React frontend} --- low priority, scheduled for the end of V3, and expected to be mostly agent-generated to keep it from consuming time better spent on the infrastructure work V3 actually exists to demonstrate.
+\end{itemize}
+
+\subsection{V4 --- Domain Depth}
+
+Where V2 and V3 are about infrastructure and engineering practice, V4 is about the business domain itself, using production context gained in the meantime: basic and advanced fraud detection (velocity checks over a Redis Sorted Set, a risk score, a blacklist), event sourcing, and CQRS. This phase also directly feeds the author's master's thesis, \emph{Real-Time Detection of Suspicious Activities}.
+
+\subsection{The Throughline}
+
+Read together, the four versions tell one story rather than four separate projects: V1 built the application; V2 turned it into a modern backend platform running on local Kubernetes; V3 migrates that same platform to the cloud with Terraform and AWS; V4 deepens the business domain --- fraud and AML --- with the architectural patterns that domain actually demands. Each version is a prerequisite for the next: there is no meaningful cloud migration of a platform that isn't correct and well-tested locally first, and no meaningful fraud-detection layer bolted onto infrastructure that hasn't already been proven under real cloud constraints.

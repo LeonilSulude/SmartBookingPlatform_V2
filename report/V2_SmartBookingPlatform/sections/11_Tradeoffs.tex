@@ -1,0 +1,20 @@
+\section{Trade-offs}
+\label{sec:tradeoffs}
+
+Most of the trade-offs in this project are local to a single decision and are documented where that decision was made --- optimistic locking versus pessimistic locking and the idempotency key's opt-in design in the Concurrency chapter, synchronous versus asynchronous replication in the Kafka chapter, committing Pact contract files instead of standing up a Broker and accepting a few redundant seconds of unit-test re-execution over chasing under-documented Maven flags in the Testing and Continuous Integration chapters. This section is different: it collects the trade-offs made about the project's \emph{scope and process} rather than its implementation --- decisions about what not to do yet, and why, that do not belong to any single technical chapter.
+
+\subsection{Branch Protection Deferred to V4}
+
+With the CI pipeline green (Section~\ref{sec:ci}), the natural next step is a GitHub branch protection rule on \texttt{main}: require a pull request before merging, and require the CI status checks to pass before that pull request can be merged. Both settings are necessary together --- requiring status checks alone only gates the ``Merge'' button on a pull request; without also requiring a pull request in the first place, a direct \texttt{git push} to \texttt{main} bypasses CI entirely.
+
+This was deliberately not enabled during V2. The project is developed solo, and every change so far --- across every phase of V2 --- has gone directly to \texttt{main}. Enabling both settings now would mean every subsequent change, however small, requires a branch, a pull request, a wait for CI, and a merge, which is real friction for a single developer iterating quickly, without a second reviewer for the pull request to actually add value to. The trade-off is accepted deliberately rather than by omission: a CI pipeline that runs but does not gate anything is honest about being a signal, not yet a safeguard.
+
+This is recorded as a concrete V4 item rather than left implicit, since by V4 the project is expected to be further from active, minute-to-minute solo iteration and closer to the kind of repository hygiene a production system --- or a portfolio piece demonstrating one --- should have.
+
+\subsection{Helm Deferred --- Kubernetes Is the Skill Being Demonstrated}
+
+Phase 5 of V2 (the V2 Objectives chapter) closes with the platform running on local Kubernetes. Helm, the standard packaging tool layered on top of raw Kubernetes manifests, was considered and deliberately not prioritised for this phase.
+
+The reasoning is about what each tool actually demonstrates. Kubernetes --- Deployments, Services, ConfigMaps, Secrets, Ingress, and how six services and their infrastructure compose into a working cluster --- is the architectural competence this phase exists to prove. Helm is a templating and release-management convenience \emph{on top of} that competence, not a separate one: a chart that wraps already-correct manifests demonstrates packaging skill, not orchestration skill, and the manifests have to be right first regardless. Introducing Helm before the manifests themselves are stable would also mean debugging two layers --- the Kubernetes objects and the templating that generates them --- at once, for a phase whose actual goal is the former.
+
+Plain manifests are kept for V2. Helm remains a reasonable addition later, once the underlying deployment is stable enough that templating it is the interesting problem rather than a source of additional debugging surface.
