@@ -43,7 +43,7 @@ The \texttt{application.yaml} of each service was updated to replace \texttt{cre
 spring:
   jpa:
     hibernate:
-      ddl-auto: validate  # schema is created by Flyway — Hibernate verifies entities match, never modifies
+      ddl-auto: validate  # schema is created by Flyway -- Hibernate verifies entities match, never modifies
     defer-datasource-initialization: true  # ensures Flyway runs migrations before Hibernate validates
 \end{lstlisting}
 
