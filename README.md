@@ -1,5 +1,5 @@
 > **V2 — Production-Ready Backend (nearly complete).**
-> Built on top of [SmartBookingPlatform V1](https://github.com/leoni-sulude/SmartBookingPlatform_V1), which is stable and documented.
+> Built on top of [SmartBookingPlatform V1](https://github.com/LeonilSulude/SmartBookingPlatform_V1), which is stable and documented.
 > V2 matures V1's architecture across correctness, security, testing, and observability. Full write-up in [`report/V2_SmartBookingPlatform`](report/V2_SmartBookingPlatform).
 
 # SmartBookingPlatform
