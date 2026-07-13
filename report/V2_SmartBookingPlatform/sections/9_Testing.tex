@@ -168,6 +168,33 @@ A JWT signature is 256 bits, Base64-encoded at 6 bits per character. The final c
 
 The fix flips a character near the middle of the token instead, which reliably lands within the JWT's payload segment. Modifying the payload guarantees the signature (computed over the original header and payload) no longer matches, deterministically, with no dependency on Base64 padding boundaries.
 
+\subsection{A Flaky Test, Again: an Assertion More Precise Than the System's Own Guarantee}
+
+\texttt{BookingCancelConcurrencyIT} fires two threads' cancel requests at the same booking, synchronised with a \texttt{CountDownLatch} so both HTTP calls start together, and originally asserted an exact split: one request wins with 200, the other loses with 409 from the \texttt{@Version} optimistic-locking check. This passed reliably for weeks, then failed once in CI with \texttt{successCount} equal to 2 instead of 1 --- both requests reporting success, with no code change anywhere near \texttt{booking-service} in the commits between the last green run and this one.
+
+The cause is in \texttt{BookingServiceImpl.cancel()} itself, not in any test infrastructure:
+
+\begin{lstlisting}[style=javastyle, language=Java, caption={The idempotent check runs before the version-guarded save}]
+if (booking.getStatus() == BookingStatus.CANCELLED) {
+    return mapToResponseDTO(booking); // idempotent -- no version check involved
+}
+booking.setStatus(BookingStatus.CANCELLED);
+Booking saved = repository.save(booking); // @Version check happens here
+\end{lstlisting}
+
+The idempotency behaviour is correct and deliberate --- a duplicate cancel request must not surface as an error to a user who already got the outcome they wanted, and this is exercised directly by the neighbouring \texttt{shouldBeIdempotentWhenCancellingAlreadyCancelledBooking} test. But it means the exact 200/409 split the concurrency test asserted only occurs when both threads' database reads happen to overlap before either commits. The \texttt{CountDownLatch} only guarantees the two HTTP calls are issued together from the client; it says nothing about when each thread's read against the database actually lands relative to the other's commit. If thread B's read happens even slightly after thread A's transaction has already committed, thread B sees an already-cancelled booking and takes the idempotent 200 path --- never reaching the \texttt{@Version} check that would have produced a 409. Both outcomes, 200/409 and 200/200, are the system behaving correctly; only the interleaving differs, and that interleaving is exactly the kind of scheduling detail a test cannot reliably force from outside the transaction boundary.
+
+The fix loosens the assertion to what the system actually guarantees --- every request handled without error, at least one genuine success, and the booking cancelled exactly once in the end --- rather than the specific 200/409 split that only sometimes happens to be true:
+
+\begin{lstlisting}[style=javastyle, language=Java, caption={Asserting the real guarantee instead of one possible interleaving}]
+assertThat(successCount.get() + conflictCount.get()).isEqualTo(2);
+assertThat(successCount.get()).isGreaterThanOrEqualTo(1);
+\end{lstlisting}
+
+The final-state assertion --- the booking is \texttt{CANCELLED}, not corrupted, not still \texttt{PENDING} --- was already present and needed no change; it was always the actual correctness property this test exists to protect. Verified deterministic across four consecutive local runs after the fix, with the full service suite (28 unit, 15 integration) passing unchanged.
+
+This is the same lesson as the JWT tampering test above, from a different angle: there, the test's own logic was flawed regardless of the system under test; here, the system under test is correct, and the test asserted a stronger guarantee than that system actually makes. Both failure modes look identical from the outside --- a test that passes for a long time and then fails for no apparent reason --- and both are only distinguishable by reading what the production code actually guarantees, not by staring harder at the test.
+
 \subsection{Test Coverage --- JaCoCo}
 
 JaCoCo was added to all five services to measure what proportion of the codebase is actually exercised by the full test suite, independent of how many test scenarios exist. This is a different question from ``do the tests cover the right business scenarios'' --- JaCoCo answers ``is there any code with \emph{no} test touching it at all,'' which intuition alone does not reliably catch.
