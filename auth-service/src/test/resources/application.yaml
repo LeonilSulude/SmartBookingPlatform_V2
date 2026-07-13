@@ -1,9 +1,0 @@
-# Disables Spring Cloud Vault for the whole test classpath. spring-cloud-starter-vault-config's
-# auto-configuration is on by default whenever the dependency is present, and tries to
-# authenticate with a real Vault server via a token (spring.cloud.vault.token or ~/.vault-token).
-# That token isn't available on a clean checkout or CI runner, only on machines that happen to
-# have a leftover local Vault setup — so tests must not depend on it being there.
-spring:
-  cloud:
-    vault:
-      enabled: false

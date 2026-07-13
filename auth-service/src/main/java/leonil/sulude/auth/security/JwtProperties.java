@@ -12,7 +12,7 @@ import org.springframework.stereotype.Component;
 public class JwtProperties {
 
 
-    private String secret;      // Gets "security.jwt.secret" from Vault
+    private String secret;      // Gets "security.jwt.secret" from the JWT_SECRET env var
     private long expiration;    // Gets "security.jwt.expiration" from yaml
 
 }

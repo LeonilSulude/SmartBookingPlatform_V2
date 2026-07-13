@@ -1,6 +1,5 @@
 package leonil.sulude.api.gateway;
 
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.reactive.AutoConfigureWebTestClient;
@@ -70,7 +69,6 @@ class GatewayRoutesTest {
      * machinery actually expects.
      */
     @Test
-    @Disabled("GatewayMetricsFilter reports \"New routes count: 0\" — static routes never bind; see comment above")
     void shouldAllowAuthEndpointsWithoutToken() {
 
         webTestClient.get()

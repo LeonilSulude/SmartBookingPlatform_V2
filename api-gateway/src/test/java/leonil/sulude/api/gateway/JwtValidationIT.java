@@ -2,7 +2,6 @@ package leonil.sulude.api.gateway;
 
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.reactive.AutoConfigureWebTestClient;
@@ -93,11 +92,7 @@ class JwtValidationIT {
                 .expectStatus().isUnauthorized();
     }
 
-    // Disabled: same root cause as GatewayRoutesTest#shouldAllowAuthEndpointsWithoutToken —
-    // GatewayMetricsFilter reports "New routes count: 0" regardless of this test's own
-    // config, so routing never reaches the load-balancer stage this assertion depends on.
     @Test
-    @Disabled("static routes never bind (\"New routes count: 0\") — same cause as GatewayRoutesTest, see that class")
     void shouldAllowAnyAuthenticatedRoleToReadCatalog() {
         Key key = Keys.hmacShaKeyFor(SECRET.getBytes());
         String token = Jwts.builder()

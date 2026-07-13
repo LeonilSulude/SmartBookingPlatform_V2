@@ -2,7 +2,6 @@ package leonil.sulude.api.gateway;
 
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.reactive.AutoConfigureWebTestClient;
@@ -37,11 +36,7 @@ class RoleBasedAuthorizationIT {
     @Autowired
     private WebTestClient webTestClient;
 
-    // Disabled: same root cause as GatewayRoutesTest#shouldAllowAuthEndpointsWithoutToken —
-    // GatewayMetricsFilter reports "New routes count: 0" regardless of this test's own
-    // config, so routing never reaches the load-balancer stage this assertion depends on.
     @Test
-    @Disabled("static routes never bind (\"New routes count: 0\") — same cause as GatewayRoutesTest, see that class")
     void shouldAllowClientToCreateBooking() {
         String token = generateToken("client@test.com", "CLIENT");
 
@@ -64,7 +59,6 @@ class RoleBasedAuthorizationIT {
     }
 
     @Test
-    @Disabled("static routes never bind (\"New routes count: 0\") — same cause as GatewayRoutesTest, see that class")
     void shouldAllowProviderToCreateOffer() {
         String token = generateToken("provider@test.com", "PROVIDER");
 
@@ -87,7 +81,6 @@ class RoleBasedAuthorizationIT {
     }
 
     @Test
-    @Disabled("static routes never bind (\"New routes count: 0\") — same cause as GatewayRoutesTest, see that class")
     void shouldAllowAdminToCreateBooking() {
         String token = generateToken("admin@test.com", "ADMIN");
 

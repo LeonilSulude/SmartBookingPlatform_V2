@@ -20,7 +20,8 @@ spring:
 
   defer-datasource-initialization: true  # ensures Flyway runs migrations before Hibernate validates the schema
 
-# TEMPORARY: JWT secret is now hardcoded here to avoid Vault issues.
+# Vault was evaluated for secret management but abandoned early on; the JWT secret is
+# loaded from the JWT_SECRET environment variable instead (see .env / start-platform.sh).
 security:
   jwt:
     secret: ${JWT_SECRET} # Loaded from environment variable
