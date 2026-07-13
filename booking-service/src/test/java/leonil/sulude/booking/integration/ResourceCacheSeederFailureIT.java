@@ -70,6 +70,18 @@ class ResourceCacheSeederFailureIT {
         wireMockServer.stop();
         kafka.stop();
         postgres.stop();
+
+        // configureFor(host, port) in @BeforeAll pointed WireMock's JVM-global default
+        // client at this class's own isolated server (8199). Without restoring it here,
+        // every other Booking Service IT class's static stubFor()/verify() calls --- which
+        // rely on that same global default, not an instance-bound client --- would silently
+        // target this now-stopped port instead of the shared 8089 server from
+        // AbstractIntegrationTest, for the rest of this JVM fork. Whether that actually
+        // happens depends entirely on test class execution order within the fork, which
+        // isn't guaranteed identical across environments --- this passed locally and failed
+        // in CI for exactly that reason: this class ran before the affected ones only on
+        // the CI runner's ordering, not on a local machine's.
+        configureFor("localhost", 8089);
     }
 
     @DynamicPropertySource
